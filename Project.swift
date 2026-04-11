@@ -12,7 +12,11 @@ import ProjectDescription
 
 let developmentTeam = "8AGTSQVX42"
 let displayName = "health 数据刷入"
-let automaticSigningSettings: SettingsDictionary = [:].automaticCodeSigning(devTeam: developmentTeam)
+let automaticSigningSettings: SettingsDictionary = [
+    "CODE_SIGN_STYLE": "Automatic",
+    "DEVELOPMENT_TEAM": .string(developmentTeam),
+    "SWIFT_EMIT_LOC_STRINGS": "YES",
+  ]
 let deploymentTargets: DeploymentTargets = .iOS("17.0")
 
 let project = Project(
