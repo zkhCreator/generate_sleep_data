@@ -12,6 +12,10 @@ import ProjectDescription
 
 let developmentTeam = "8AGTSQVX42"
 let displayName = "health 数据刷入"
+let baseSigningSettings: SettingsDictionary = [
+    "CODE_SIGN_STYLE": .string("Automatic"),
+    "DEVELOPMENT_TEAM": .string(developmentTeam),
+]
 
 let project = Project(
     name: "generate_sleep_data",
@@ -37,9 +41,14 @@ let project = Project(
             entitlements: .file(path: "generate_sleep_data/generate_sleep_data.entitlements"),
             dependencies: [],
             settings: .settings(
-                base: [
-                    "DEVELOPMENT_TEAM": .string(developmentTeam),
-                ]
+                base: baseSigningSettings,
+                debug: [
+                    "CODE_SIGN_IDENTITY": .string("Apple Development"),
+                ],
+                release: [
+                    "CODE_SIGN_IDENTITY": .string("Apple Distribution"),
+                ],
+                defaultSettings: .recommended(excluding: ["CODE_SIGN_IDENTITY"])
             )
         ),
         .target(
@@ -52,9 +61,14 @@ let project = Project(
             resources: [],
             dependencies: [.target(name: "generate_sleep_data")],
             settings: .settings(
-                base: [
-                    "DEVELOPMENT_TEAM": .string(developmentTeam),
-                ]
+                base: baseSigningSettings,
+                debug: [
+                    "CODE_SIGN_IDENTITY": .string("Apple Development"),
+                ],
+                release: [
+                    "CODE_SIGN_IDENTITY": .string("Apple Development"),
+                ],
+                defaultSettings: .recommended(excluding: ["CODE_SIGN_IDENTITY"])
             )
         ),
     ]
