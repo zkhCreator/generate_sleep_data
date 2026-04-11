@@ -41,14 +41,7 @@ let project = Project(
             entitlements: .file(path: "generate_sleep_data/generate_sleep_data.entitlements"),
             dependencies: [],
             settings: .settings(
-                base: baseSigningSettings,
-                debug: [
-                    "CODE_SIGN_IDENTITY": .string("Apple Development"),
-                ],
-                release: [
-                    "CODE_SIGN_IDENTITY": .string("Apple Distribution"),
-                ],
-                defaultSettings: .recommended(excluding: ["CODE_SIGN_IDENTITY"])
+                base: baseSigningSettings
             )
         ),
         .target(
@@ -61,14 +54,7 @@ let project = Project(
             resources: [],
             dependencies: [.target(name: "generate_sleep_data")],
             settings: .settings(
-                base: baseSigningSettings,
-                debug: [
-                    "CODE_SIGN_IDENTITY": .string("Apple Development"),
-                ],
-                release: [
-                    "CODE_SIGN_IDENTITY": .string("Apple Development"),
-                ],
-                defaultSettings: .recommended(excluding: ["CODE_SIGN_IDENTITY"])
+                base: baseSigningSettings
             )
         ),
     ]
