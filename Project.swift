@@ -12,10 +12,8 @@ import ProjectDescription
 
 let developmentTeam = "8AGTSQVX42"
 let displayName = "health 数据刷入"
-let baseSigningSettings: SettingsDictionary = [
-    "CODE_SIGN_STYLE": .string("Automatic"),
-    "DEVELOPMENT_TEAM": .string(developmentTeam),
-]
+let automaticSigningSettings: SettingsDictionary = [:].automaticCodeSigning(devTeam: developmentTeam)
+let deploymentTargets: DeploymentTargets = .iOS("17.0")
 
 let project = Project(
     name: "generate_sleep_data",
@@ -25,6 +23,7 @@ let project = Project(
             destinations: .iOS,
             product: .app,
             bundleId: "com.laterwork.generate.health.data",
+            deploymentTargets: deploymentTargets,
             infoPlist: .extendingDefault(
                 with: [
                     "CFBundleDisplayName": .string(displayName),
@@ -41,7 +40,7 @@ let project = Project(
             entitlements: .file(path: "generate_sleep_data/generate_sleep_data.entitlements"),
             dependencies: [],
             settings: .settings(
-                base: baseSigningSettings
+                base: automaticSigningSettings
             )
         ),
         .target(
@@ -49,12 +48,13 @@ let project = Project(
             destinations: .iOS,
             product: .unitTests,
             bundleId: "com.laterwork.generate.health.dataTests",
+            deploymentTargets: deploymentTargets,
             infoPlist: .default,
             sources: ["generate_sleep_data/Tests/**"],
             resources: [],
             dependencies: [.target(name: "generate_sleep_data")],
             settings: .settings(
-                base: baseSigningSettings
+                base: automaticSigningSettings
             )
         ),
     ]
