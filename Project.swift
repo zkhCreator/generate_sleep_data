@@ -3,14 +3,15 @@
 //
 // Responsibilities:
 // Declare the iOS app target, wire the HealthKit entitlement, and provide the
-// privacy strings and signing settings required to write sleep and HRV samples
-// into Apple Health.
+// privacy strings, signing settings, app display name, and export-compliance
+// metadata required to write sleep and HRV samples into Apple Health.
 //
 // Non-Goals:
 // This file does not describe runtime behavior or business logic.
 import ProjectDescription
 
 let developmentTeam = "8AGTSQVX42"
+let displayName = "health 数据刷入"
 
 let project = Project(
     name: "generate_sleep_data",
@@ -22,7 +23,9 @@ let project = Project(
             bundleId: "com.laterwork.generate.health.data",
             infoPlist: .extendingDefault(
                 with: [
+                    "CFBundleDisplayName": .string(displayName),
                     "NSHealthUpdateUsageDescription": "需要将生成的 sleep data 和 HRV 写入 Health，便于快速构造测试用健康记录。",
+                    "ITSAppUsesNonExemptEncryption": .boolean(false),
                     "UILaunchScreen": [
                         "UIColorName": "",
                         "UIImageName": "",
