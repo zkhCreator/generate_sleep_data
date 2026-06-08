@@ -58,6 +58,10 @@ struct ContentView: View {
                     hrvSections
                 }
 
+                if viewModel.showsRestingHeartRateControls {
+                    restingHeartRateSections
+                }
+
                 if viewModel.showsWorkoutControls {
                     workoutSections
                 }
@@ -248,6 +252,76 @@ struct ContentView: View {
             }
         } footer: {
             Text("会按所选天数，每天写入 1 条 heartRateVariabilitySDNN sample（单位 ms），数值围绕所选档位的基准值逐日波动。清除入口只会删除当前范围内由本 app 写入的 HRV 数据。")
+        }
+    }
+
+    @ViewBuilder
+    private var restingHeartRateSections: some View {
+        Section("快速预设") {
+            ForEach(RestingHeartRatePreset.allCases) { preset in
+                Button {
+                    viewModel.apply(preset)
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(preset.title)
+                            .font(.headline)
+                        Text(preset.subtitle)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+
+        Section("生成参数") {
+            DatePicker(
+                "最后一天",
+                selection: restingHeartRateEndDateBinding,
+                displayedComponents: [.date]
+            )
+
+            DatePicker(
+                "记录时间",
+                selection: restingHeartRateTimeBinding,
+                displayedComponents: [.hourAndMinute]
+            )
+
+            Stepper(value: restingHeartRateDaysBinding, in: 1...365) {
+                LabeledContent("覆盖天数", value: "\(viewModel.restingHeartRateRequest.days) 天")
+            }
+
+            Stepper(value: averageRestingHeartRateBinding, in: 40...120) {
+                LabeledContent("静息心率", value: "\(viewModel.restingHeartRateRequest.averageBeatsPerMinute) 次/分")
+            }
+
+            Text(viewModel.restingHeartRateScheduleSummary)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+
+        Section {
+            Button {
+                Task {
+                    await viewModel.performPrimaryAction()
+                }
+            } label: {
+                actionLabel
+            }
+            .disabled(viewModel.isWorking || viewModel.authorizationState == .unavailable)
+
+            if viewModel.showsClearButton {
+                Button(role: .destructive) {
+                    isShowingDeleteConfirmation = true
+                } label: {
+                    Text(viewModel.clearButtonTitle)
+                        .fontWeight(.semibold)
+                        .frame(maxWidth: .infinity)
+                }
+                .disabled(viewModel.isWorking || viewModel.authorizationState == .unavailable)
+            }
+        } footer: {
+            Text("会按所选天数，每天写入 1 条 restingHeartRate sample（单位 次/分），数值围绕设定的基准值逐日波动。清除入口只会删除当前范围内由本 app 写入的静息心率记录。")
         }
     }
 
@@ -535,6 +609,34 @@ struct ContentView: View {
         Binding(
             get: { viewModel.hrvRequest.days },
             set: { viewModel.hrvRequest.days = $0 }
+        )
+    }
+
+    private var restingHeartRateEndDateBinding: Binding<Date> {
+        Binding(
+            get: { viewModel.restingHeartRateRequest.endDate },
+            set: { viewModel.restingHeartRateRequest.endDate = $0 }
+        )
+    }
+
+    private var restingHeartRateTimeBinding: Binding<Date> {
+        Binding(
+            get: { viewModel.restingHeartRateRequest.sampleTime },
+            set: { viewModel.restingHeartRateRequest.sampleTime = $0 }
+        )
+    }
+
+    private var restingHeartRateDaysBinding: Binding<Int> {
+        Binding(
+            get: { viewModel.restingHeartRateRequest.days },
+            set: { viewModel.restingHeartRateRequest.days = $0 }
+        )
+    }
+
+    private var averageRestingHeartRateBinding: Binding<Int> {
+        Binding(
+            get: { viewModel.restingHeartRateRequest.averageBeatsPerMinute },
+            set: { viewModel.restingHeartRateRequest.averageBeatsPerMinute = $0 }
         )
     }
 

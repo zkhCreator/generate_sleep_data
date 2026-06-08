@@ -17,6 +17,7 @@ import Foundation
 enum HealthDataMode: String, CaseIterable, Identifiable {
     case sleep
     case hrv
+    case restingHeartRate
     case workout
     case steps
     case menstrual
@@ -29,6 +30,8 @@ enum HealthDataMode: String, CaseIterable, Identifiable {
             return "Sleep"
         case .hrv:
             return "HRV"
+        case .restingHeartRate:
+            return "静息心率"
         case .workout:
             return "锻炼"
         case .steps:
@@ -44,6 +47,8 @@ enum HealthDataMode: String, CaseIterable, Identifiable {
             return "Sleep Data"
         case .hrv:
             return "HRV Data"
+        case .restingHeartRate:
+            return "静息心率数据"
         case .workout:
             return "锻炼数据"
         case .steps:

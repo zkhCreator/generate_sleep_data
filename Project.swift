@@ -31,8 +31,8 @@ let project = Project(
             infoPlist: .extendingDefault(
                 with: [
                     "CFBundleDisplayName": .string(displayName),
-                    "NSHealthShareUsageDescription": "需要读取 Health 中与你授权的睡眠、HRV、锻炼、步数和经期记录状态，用于确认权限状态并校验写入结果。",
-                    "NSHealthUpdateUsageDescription": "需要将生成的 sleep data、HRV、锻炼、步数和经期记录写入 Health，便于快速构造测试用健康记录。",
+                    "NSHealthShareUsageDescription": "需要读取 Health 中与你授权的睡眠、HRV、静息心率、锻炼、步数和经期记录状态，用于确认权限状态并校验写入结果。",
+                    "NSHealthUpdateUsageDescription": "需要将生成的 sleep data、HRV、静息心率、锻炼、步数和经期记录写入 Health，便于快速构造测试用健康记录。",
                     "ITSAppUsesNonExemptEncryption": .boolean(false),
                     "UILaunchScreen": [
                         "UIColorName": "",

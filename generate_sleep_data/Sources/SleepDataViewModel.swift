@@ -19,6 +19,7 @@ final class SleepDataViewModel: ObservableObject {
     @Published var selectedMode: HealthDataMode
     @Published var request: SleepGenerationRequest
     @Published var hrvRequest: HRVWriteRequest
+    @Published var restingHeartRateRequest: RestingHeartRateGenerationRequest
     @Published var workoutRequest: WorkoutGenerationRequest
     @Published var stepRequest: StepGenerationRequest
     @Published var menstrualRequest: MenstrualGenerationRequest
@@ -41,6 +42,7 @@ final class SleepDataViewModel: ObservableObject {
         self.selectedMode = .sleep
         self.request = SleepGenerationRequest.default(calendar: calendar, now: now())
         self.hrvRequest = HRVWriteRequest.default(calendar: calendar, now: now())
+        self.restingHeartRateRequest = RestingHeartRateGenerationRequest.default(calendar: calendar, now: now())
         self.workoutRequest = WorkoutGenerationRequest.default(calendar: calendar, now: now())
         self.stepRequest = StepGenerationRequest.default(calendar: calendar, now: now())
         self.menstrualRequest = MenstrualGenerationRequest.default(calendar: calendar, now: now())
@@ -98,6 +100,8 @@ final class SleepDataViewModel: ObservableObject {
                 return "现在可以把生成的 sleep data 直接写入到 Apple Health。"
             case .hrv:
                 return "现在可以把今天的 HRV 直接写入到 Apple Health。"
+            case .restingHeartRate:
+                return "现在可以把生成的静息心率记录直接写入到 Apple Health。"
             case .workout:
                 return "现在可以把生成的锻炼记录直接写入到 Apple Health。"
             case .steps:
@@ -113,6 +117,8 @@ final class SleepDataViewModel: ObservableObject {
                 return "首次写入前会弹出系统授权框，只申请 sleepAnalysis 写入权限。"
             case .hrv:
                 return "首次写入前会弹出系统授权框，只申请 heartRateVariabilitySDNN 写入权限。"
+            case .restingHeartRate:
+                return "首次写入前会弹出系统授权框，只申请 restingHeartRate 写入权限。"
             case .workout:
                 return "首次写入前会弹出系统授权框，申请 workout、活动能量与距离的写入权限。"
             case .steps:
@@ -131,6 +137,8 @@ final class SleepDataViewModel: ObservableObject {
             return authorizationState.isAuthorized ? "写入到 Health" : "授权并写入到 Health"
         case .hrv:
             return authorizationState.isAuthorized ? "写入今天的 HRV" : "授权并写入今天的 HRV"
+        case .restingHeartRate:
+            return authorizationState.isAuthorized ? "写入静息心率到 Health" : "授权并写入静息心率到 Health"
         case .workout:
             return authorizationState.isAuthorized ? "写入锻炼记录到 Health" : "授权并写入锻炼记录到 Health"
         case .steps:
@@ -150,6 +158,10 @@ final class SleepDataViewModel: ObservableObject {
 
     var showsHRVControls: Bool {
         selectedMode == .hrv
+    }
+
+    var showsRestingHeartRateControls: Bool {
+        selectedMode == .restingHeartRate
     }
 
     var showsWorkoutControls: Bool {
@@ -231,6 +243,20 @@ final class SleepDataViewModel: ObservableObject {
         return "将写入 \(samples.count) 条 HRV sample（每天 1 条，围绕基准 \(hrvValueText) 波动）。时间范围：\(rangeText)。档位：\(hrvRequest.preset.title)。"
     }
 
+    var restingHeartRateScheduleSummary: String {
+        let samples = restingHeartRateRequest.makeSamples(calendar: calendar)
+        guard let first = samples.first, let last = samples.last else {
+            return "请至少生成 1 天，且静息心率大于 0。"
+        }
+
+        if samples.count == 1 {
+            return "今天将写入 1 条静息心率 sample。记录时间：\(Self.dateTimeFormatter.string(from: last.date))。基准约 \(restingHeartRateRequest.averageBeatsPerMinute) 次/分。"
+        }
+
+        let rangeText = "\(Self.dateFormatter.string(from: first.date)) 到 \(Self.dateFormatter.string(from: last.date))"
+        return "将写入 \(samples.count) 条静息心率 sample（每天 1 条，围绕基准 \(restingHeartRateRequest.averageBeatsPerMinute) 次/分波动）。时间范围：\(rangeText)。"
+    }
+
     var workoutScheduleSummary: String {
         let sessions = workoutRequest.makeSessions(calendar: calendar)
         guard let first = sessions.first, let last = sessions.last else {
@@ -286,6 +312,8 @@ final class SleepDataViewModel: ObservableObject {
         switch selectedMode {
         case .hrv:
             return "会删除当前时间范围内、由本 app 写入的 HRV 数据。不会影响其他来源的 HRV 记录。\(hrvRequestRangeText)"
+        case .restingHeartRate:
+            return "会删除当前时间范围内、由本 app 写入的静息心率数据。不会影响其他来源的静息心率记录。\(restingHeartRateRequestRangeText)"
         case .workout:
             return "会删除当前时间范围内、由本 app 写入的锻炼记录。不会影响其他来源的运动数据。\(workoutRequestRangeText)"
         case .steps:
@@ -301,6 +329,9 @@ final class SleepDataViewModel: ObservableObject {
         selectedMode = mode
         if mode == .hrv {
             hrvRequest.recordDate = calendar.startOfDay(for: now())
+        }
+        if mode == .restingHeartRate {
+            restingHeartRateRequest.endDate = calendar.startOfDay(for: now())
         }
         if mode == .workout {
             workoutRequest.endDate = calendar.startOfDay(for: now())
@@ -326,6 +357,11 @@ final class SleepDataViewModel: ObservableObject {
 
     func apply(_ preset: HRVRangePreset) {
         preset.apply(to: &hrvRequest, calendar: calendar, now: now())
+        statusMessage = nil
+    }
+
+    func apply(_ preset: RestingHeartRatePreset) {
+        preset.apply(to: &restingHeartRateRequest, calendar: calendar, now: now())
         statusMessage = nil
     }
 
@@ -367,6 +403,8 @@ final class SleepDataViewModel: ObservableObject {
             await generateSleepData()
         case .hrv:
             await writeHRVData()
+        case .restingHeartRate:
+            await generateRestingHeartRateData()
         case .workout:
             await generateWorkoutData()
         case .steps:
@@ -380,6 +418,8 @@ final class SleepDataViewModel: ObservableObject {
         switch selectedMode {
         case .hrv:
             await deleteHRVData()
+        case .restingHeartRate:
+            await deleteRestingHeartRateData()
         case .workout:
             await deleteWorkoutData()
         case .steps:
@@ -501,6 +541,55 @@ final class SleepDataViewModel: ObservableObject {
             }
         } catch {
             authorizationState = healthStore.authorizationStatus(for: .hrv)
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    func generateRestingHeartRateData() async {
+        guard !isWorking else {
+            return
+        }
+
+        isWorking = true
+        statusMessage = nil
+        defer { isWorking = false }
+
+        do {
+            try await ensureAuthorization(for: .restingHeartRate)
+
+            let result = try await healthStore.writeRestingHeartRateData(for: restingHeartRateRequest)
+            if result.sampleCount == 1 {
+                statusMessage = "已写入今天的静息心率（1 条 sample）。记录时间：\(Self.dateTimeFormatter.string(from: result.lastDate))。基准：\(result.baselineBeatsPerMinute) 次/分。"
+            } else {
+                let rangeText = "\(Self.dateFormatter.string(from: result.firstDate)) 到 \(Self.dateFormatter.string(from: result.lastDate))"
+                statusMessage = "已写入 \(result.sampleCount) 条静息心率 sample（围绕基准 \(result.baselineBeatsPerMinute) 次/分波动）。时间范围：\(rangeText)。批次 ID：\(result.batchID.prefix(8))。"
+            }
+        } catch {
+            authorizationState = healthStore.authorizationStatus(for: .restingHeartRate)
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    func deleteRestingHeartRateData() async {
+        guard !isWorking else {
+            return
+        }
+
+        isWorking = true
+        statusMessage = nil
+        defer { isWorking = false }
+
+        do {
+            try await ensureAuthorization(for: .restingHeartRate)
+
+            let result = try await healthStore.deleteGeneratedRestingHeartRateData(for: restingHeartRateRequest)
+            if result.deletedSampleCount == 0 {
+                statusMessage = "当前范围内没有找到由本 app 写入的静息心率记录。\(restingHeartRateRequestRangeText)。"
+            } else {
+                statusMessage = "已删除 \(result.deletedSampleCount) 条静息心率 sample。\(restingHeartRateRequestRangeText)。"
+            }
+        } catch {
+            authorizationState = healthStore.authorizationStatus(for: .restingHeartRate)
             statusMessage = error.localizedDescription
         }
     }
@@ -646,6 +735,15 @@ final class SleepDataViewModel: ObservableObject {
 
     private var hrvRequestRangeText: String {
         let samples = currentHRVRequest.makeSamples(calendar: calendar)
+        guard let first = samples.first, let last = samples.last else {
+            return "时间范围：未知"
+        }
+
+        return "时间范围：\(Self.dateFormatter.string(from: first.date)) 到 \(Self.dateFormatter.string(from: last.date))"
+    }
+
+    private var restingHeartRateRequestRangeText: String {
+        let samples = restingHeartRateRequest.makeSamples(calendar: calendar)
         guard let first = samples.first, let last = samples.last else {
             return "时间范围：未知"
         }

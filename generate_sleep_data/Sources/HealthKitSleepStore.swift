@@ -22,11 +22,13 @@ protocol HealthDataWriting: AnyObject {
     func requestAuthorization(for mode: HealthDataMode) async throws -> HealthAuthorizationState
     func writeSleepData(for request: SleepGenerationRequest) async throws -> SleepWriteResult
     func writeHRVData(for request: HRVWriteRequest) async throws -> HRVWriteResult
+    func writeRestingHeartRateData(for request: RestingHeartRateGenerationRequest) async throws -> RestingHeartRateWriteResult
     func writeWorkoutData(for request: WorkoutGenerationRequest) async throws -> WorkoutWriteResult
     func writeStepData(for request: StepGenerationRequest) async throws -> StepWriteResult
     func writeMenstrualData(for request: MenstrualGenerationRequest) async throws -> MenstrualWriteResult
     func deleteGeneratedSleepData(for request: SleepGenerationRequest) async throws -> SleepDeleteResult
     func deleteGeneratedHRVData(for request: HRVWriteRequest) async throws -> HRVDeleteResult
+    func deleteGeneratedRestingHeartRateData(for request: RestingHeartRateGenerationRequest) async throws -> RestingHeartRateDeleteResult
     func deleteGeneratedWorkoutData(for request: WorkoutGenerationRequest) async throws -> WorkoutDeleteResult
     func deleteGeneratedStepData(for request: StepGenerationRequest) async throws -> StepDeleteResult
     func deleteGeneratedMenstrualData(for request: MenstrualGenerationRequest) async throws -> MenstrualDeleteResult
@@ -58,6 +60,18 @@ struct HRVWriteResult: Equatable {
 }
 
 struct HRVDeleteResult: Equatable {
+    let deletedSampleCount: Int
+}
+
+struct RestingHeartRateWriteResult: Equatable {
+    let batchID: String
+    let sampleCount: Int
+    let baselineBeatsPerMinute: Int
+    let firstDate: Date
+    let lastDate: Date
+}
+
+struct RestingHeartRateDeleteResult: Equatable {
     let deletedSampleCount: Int
 }
 
@@ -106,12 +120,14 @@ enum HealthStoreError: LocalizedError {
     case healthDataUnavailable
     case sleepTypeUnavailable
     case hrvTypeUnavailable
+    case restingHeartRateTypeUnavailable
     case workoutTypeUnavailable
     case stepTypeUnavailable
     case menstrualTypeUnavailable
     case authorizationRequired
     case emptySleepRequest
     case emptyHRVRequest
+    case emptyRestingHeartRateRequest
     case emptyWorkoutRequest
     case emptyStepRequest
     case emptyMenstrualRequest
@@ -124,6 +140,8 @@ enum HealthStoreError: LocalizedError {
             return "当前系统无法创建 sleepAnalysis 类型。"
         case .hrvTypeUnavailable:
             return "当前系统无法创建 HRV 类型。"
+        case .restingHeartRateTypeUnavailable:
+            return "当前系统无法创建 restingHeartRate 类型。"
         case .workoutTypeUnavailable:
             return "当前系统无法创建 workout 类型。"
         case .stepTypeUnavailable:
@@ -136,6 +154,8 @@ enum HealthStoreError: LocalizedError {
             return "没有可写入的 sleep data。请检查晚数和睡眠时长。"
         case .emptyHRVRequest:
             return "没有可写入的 HRV 数据。请检查天数设置。"
+        case .emptyRestingHeartRateRequest:
+            return "没有可写入的静息心率数据。请检查天数和静息心率设置。"
         case .emptyWorkoutRequest:
             return "没有可写入的锻炼数据。请检查天数和每周次数。"
         case .emptyStepRequest:
@@ -276,6 +296,53 @@ final class HealthKitStore: HealthDataWriting {
             batchID: batchID,
             sampleCount: samples.count,
             baselineMilliseconds: request.valueMilliseconds,
+            firstDate: firstSample.date,
+            lastDate: lastSample.date
+        )
+    }
+
+    func writeRestingHeartRateData(for request: RestingHeartRateGenerationRequest) async throws -> RestingHeartRateWriteResult {
+        guard HKHealthStore.isHealthDataAvailable() else {
+            throw HealthStoreError.healthDataUnavailable
+        }
+
+        guard authorizationStatus(for: .restingHeartRate).isAuthorized else {
+            throw HealthStoreError.authorizationRequired
+        }
+
+        let restingHeartRateType = try requireRestingHeartRateType()
+        let daySamples = request.makeSamples()
+        guard let firstSample = daySamples.first, let lastSample = daySamples.last else {
+            throw HealthStoreError.emptyRestingHeartRateRequest
+        }
+
+        let batchID = UUID().uuidString
+        let unit = HKUnit.count().unitDivided(by: .minute())
+        let samples = daySamples.map { daySample in
+            HKQuantitySample(
+                type: restingHeartRateType,
+                quantity: HKQuantity(unit: unit, doubleValue: daySample.beatsPerMinute),
+                start: daySample.date,
+                end: daySample.date,
+                metadata: [
+                    HKMetadataKeyWasUserEntered: true,
+                    Self.batchIDKey: batchID,
+                    Self.sampleKindKey: "restingHeartRate",
+                ]
+            )
+        }
+        logRestingHeartRateWrite(batchID: batchID, request: request, sampleCount: samples.count)
+
+        for chunk in stride(from: 0, to: samples.count, by: 1000) {
+            let upperBound = min(chunk + 1000, samples.count)
+            try await save(Array(samples[chunk..<upperBound]))
+        }
+        print("[HealthWrite][RestingHeartRate] save succeeded. batchID=\(batchID) sampleCount=\(samples.count)")
+
+        return RestingHeartRateWriteResult(
+            batchID: batchID,
+            sampleCount: samples.count,
+            baselineBeatsPerMinute: request.averageBeatsPerMinute,
             firstDate: firstSample.date,
             lastDate: lastSample.date
         )
@@ -440,6 +507,35 @@ final class HealthKitStore: HealthDataWriting {
         let deletedSampleCount = try await deleteObjects(of: hrvType, predicate: predicate)
 
         return HRVDeleteResult(deletedSampleCount: deletedSampleCount)
+    }
+
+    func deleteGeneratedRestingHeartRateData(for request: RestingHeartRateGenerationRequest) async throws -> RestingHeartRateDeleteResult {
+        guard HKHealthStore.isHealthDataAvailable() else {
+            throw HealthStoreError.healthDataUnavailable
+        }
+
+        guard authorizationStatus(for: .restingHeartRate).isAuthorized else {
+            throw HealthStoreError.authorizationRequired
+        }
+
+        let restingHeartRateType = try requireRestingHeartRateType()
+        let daySamples = request.makeSamples()
+        guard let firstSample = daySamples.first, let lastSample = daySamples.last else {
+            throw HealthStoreError.emptyRestingHeartRateRequest
+        }
+
+        // Resting heart rate samples are instantaneous, so nudge the end out by a
+        // minute to make sure the final day's reading is inside the range.
+        let datePredicate = HKQuery.predicateForSamples(
+            withStart: firstSample.date,
+            end: lastSample.date.addingTimeInterval(60),
+            options: .strictStartDate
+        )
+        let metadataPredicate = HKQuery.predicateForObjects(withMetadataKey: Self.batchIDKey)
+        let predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [datePredicate, metadataPredicate])
+        let deletedSampleCount = try await deleteObjects(of: restingHeartRateType, predicate: predicate)
+
+        return RestingHeartRateDeleteResult(deletedSampleCount: deletedSampleCount)
     }
 
     func deleteGeneratedWorkoutData(for request: WorkoutGenerationRequest) async throws -> WorkoutDeleteResult {
@@ -623,6 +719,8 @@ final class HealthKitStore: HealthDataWriting {
             return HKObjectType.categoryType(forIdentifier: .sleepAnalysis)
         case .hrv:
             return HKObjectType.quantityType(forIdentifier: .heartRateVariabilitySDNN)
+        case .restingHeartRate:
+            return HKObjectType.quantityType(forIdentifier: .restingHeartRate)
         case .workout:
             return HKObjectType.workoutType()
         case .steps:
@@ -639,6 +737,8 @@ final class HealthKitStore: HealthDataWriting {
                 throw HealthStoreError.sleepTypeUnavailable
             case .hrv:
                 throw HealthStoreError.hrvTypeUnavailable
+            case .restingHeartRate:
+                throw HealthStoreError.restingHeartRateTypeUnavailable
             case .workout:
                 throw HealthStoreError.workoutTypeUnavailable
             case .steps:
@@ -653,7 +753,7 @@ final class HealthKitStore: HealthDataWriting {
 
     private func shareTypes(for mode: HealthDataMode) throws -> Set<HKSampleType> {
         switch mode {
-        case .sleep, .hrv, .steps, .menstrual:
+        case .sleep, .hrv, .restingHeartRate, .steps, .menstrual:
             return [try requireSampleType(for: mode)]
         case .workout:
             var types: Set<HKSampleType> = [HKObjectType.workoutType()]
@@ -686,6 +786,14 @@ final class HealthKitStore: HealthDataWriting {
         }
 
         return hrvType
+    }
+
+    private func requireRestingHeartRateType() throws -> HKQuantityType {
+        guard let restingHeartRateType = HKObjectType.quantityType(forIdentifier: .restingHeartRate) else {
+            throw HealthStoreError.restingHeartRateTypeUnavailable
+        }
+
+        return restingHeartRateType
     }
 
     private func requireStepType() throws -> HKQuantityType {
@@ -891,6 +999,24 @@ final class HealthKitStore: HealthDataWriting {
             sampleTime=\(Self.consoleTimeFormatter.string(from: request.sampleTime))
             days=\(request.days)
             baselineMilliseconds=\(request.valueMilliseconds)
+            sampleCount=\(sampleCount)
+            """
+        )
+    }
+
+    private func logRestingHeartRateWrite(
+        batchID: String,
+        request: RestingHeartRateGenerationRequest,
+        sampleCount: Int
+    ) {
+        print(
+            """
+            [HealthWrite][RestingHeartRate] preparing save.
+            batchID=\(batchID)
+            endDate=\(Self.consoleDateFormatter.string(from: request.endDate))
+            sampleTime=\(Self.consoleTimeFormatter.string(from: request.sampleTime))
+            days=\(request.days)
+            averageBeatsPerMinute=\(request.averageBeatsPerMinute)
             sampleCount=\(sampleCount)
             """
         )
