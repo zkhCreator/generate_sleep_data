@@ -19,6 +19,7 @@ enum HealthDataMode: String, CaseIterable, Identifiable {
     case hrv
     case workout
     case steps
+    case menstrual
 
     var id: String { rawValue }
 
@@ -32,6 +33,8 @@ enum HealthDataMode: String, CaseIterable, Identifiable {
             return "锻炼"
         case .steps:
             return "步数"
+        case .menstrual:
+            return "经期"
         }
     }
 
@@ -45,6 +48,8 @@ enum HealthDataMode: String, CaseIterable, Identifiable {
             return "锻炼数据"
         case .steps:
             return "步数数据"
+        case .menstrual:
+            return "经期数据"
         }
     }
 }
@@ -82,13 +87,14 @@ enum HRVPreset: String, CaseIterable, Identifiable {
         }
     }
 
-    /// How far a day's reading may swing above/below the baseline, in ms.
+    /// The typical day-to-day swing around the baseline, in ms. Combined drift +
+    /// jitter can occasionally reach roughly 1.4× this on a peak day.
     var variationMilliseconds: Double {
         switch self {
         case .tooLow:
-            return 4
+            return 6
         case .tooHigh:
-            return 12
+            return 16
         }
     }
 }
@@ -133,7 +139,16 @@ struct HRVWriteRequest: Equatable {
 
                 let sampleDate = calendar.combineHRVDate(date: day, withTimeFrom: sampleTime)
                 let seed = MockVariation.daySeed(for: day, calendar: calendar)
-                let value = max(1, (preset.valueMilliseconds + MockVariation.signedNoise(seed) * preset.variationMilliseconds).rounded())
+
+                // Combine a slow multi-week drift with two faster octaves and a
+                // little daily jitter so the trend rises and falls instead of just
+                // jittering around a flat line.
+                let position = Double(seed)
+                let drift = MockVariation.smoothNoise(position / 23) * 0.6
+                    + MockVariation.smoothNoise(position / 9 + 100) * 0.35
+                    + MockVariation.smoothNoise(position / 4 + 250) * 0.2
+                let jitter = MockVariation.signedNoise(seed &* 31 &+ 7) * 0.25
+                let value = max(1, (preset.valueMilliseconds + (drift + jitter) * preset.variationMilliseconds).rounded())
                 return HRVDaySample(date: sampleDate, valueMilliseconds: value)
             }
             .sorted { $0.date < $1.date }

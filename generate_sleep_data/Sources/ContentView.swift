@@ -66,6 +66,10 @@ struct ContentView: View {
                     stepSections
                 }
 
+                if viewModel.showsMenstrualControls {
+                    menstrualSections
+                }
+
                 if let statusMessage = viewModel.statusMessage {
                     Section("结果") {
                         Text(statusMessage)
@@ -382,6 +386,74 @@ struct ContentView: View {
     }
 
     @ViewBuilder
+    private var menstrualSections: some View {
+        Section("快速预设") {
+            ForEach(MenstrualPreset.allCases) { preset in
+                Button {
+                    viewModel.apply(preset)
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(preset.title)
+                            .font(.headline)
+                        Text(preset.subtitle)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+
+        Section("生成参数") {
+            DatePicker(
+                "最后一天",
+                selection: menstrualEndDateBinding,
+                displayedComponents: [.date]
+            )
+
+            Stepper(value: menstrualDaysBinding, in: 7...365) {
+                LabeledContent("覆盖天数", value: "\(viewModel.menstrualRequest.days) 天")
+            }
+
+            Stepper(value: cycleLengthBinding, in: 21...35) {
+                LabeledContent("周期长度", value: "\(viewModel.menstrualRequest.cycleLength) 天")
+            }
+
+            Stepper(value: periodLengthBinding, in: 2...10) {
+                LabeledContent("经期长度", value: "\(viewModel.menstrualRequest.periodLength) 天")
+            }
+
+            Text(viewModel.menstrualScheduleSummary)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+
+        Section {
+            Button {
+                Task {
+                    await viewModel.performPrimaryAction()
+                }
+            } label: {
+                actionLabel
+            }
+            .disabled(viewModel.isWorking || viewModel.authorizationState == .unavailable)
+
+            if viewModel.showsClearButton {
+                Button(role: .destructive) {
+                    isShowingDeleteConfirmation = true
+                } label: {
+                    Text(viewModel.clearButtonTitle)
+                        .fontWeight(.semibold)
+                        .frame(maxWidth: .infinity)
+                }
+                .disabled(viewModel.isWorking || viewModel.authorizationState == .unavailable)
+            }
+        } footer: {
+            Text("会按所选周期长度，在覆盖天数内生成多个经期，每天写入 1 条 menstrualFlow 记录（少量 / 中等 / 大量），并标记每个周期的第一天。周期与经期长度会逐周期轻微波动。清除入口只会删除当前范围内由本 app 写入的经期记录。")
+        }
+    }
+
+    @ViewBuilder
     private var actionLabel: some View {
         if viewModel.isWorking {
             HStack {
@@ -505,6 +577,34 @@ struct ContentView: View {
         Binding(
             get: { viewModel.stepRequest.averageStepsPerDay },
             set: { viewModel.stepRequest.averageStepsPerDay = $0 }
+        )
+    }
+
+    private var menstrualEndDateBinding: Binding<Date> {
+        Binding(
+            get: { viewModel.menstrualRequest.endDate },
+            set: { viewModel.menstrualRequest.endDate = $0 }
+        )
+    }
+
+    private var menstrualDaysBinding: Binding<Int> {
+        Binding(
+            get: { viewModel.menstrualRequest.days },
+            set: { viewModel.menstrualRequest.days = $0 }
+        )
+    }
+
+    private var cycleLengthBinding: Binding<Int> {
+        Binding(
+            get: { viewModel.menstrualRequest.cycleLength },
+            set: { viewModel.menstrualRequest.cycleLength = $0 }
+        )
+    }
+
+    private var periodLengthBinding: Binding<Int> {
+        Binding(
+            get: { viewModel.menstrualRequest.periodLength },
+            set: { viewModel.menstrualRequest.periodLength = $0 }
         )
     }
 }

@@ -27,6 +27,19 @@ enum MockVariation {
         unitNoise(seed) * 2 - 1
     }
 
+    /// Smoothly interpolated signed noise in [-1, 1) sampled at a continuous
+    /// position `x`. Successive integer positions are smoothstep-blended, so the
+    /// output wanders gradually instead of jumping every step — useful for
+    /// low-frequency drift / trends rather than pure white noise.
+    static func smoothNoise(_ x: Double) -> Double {
+        let lower = x.rounded(.down)
+        let fraction = x - lower
+        let a = signedNoise(Int(lower))
+        let b = signedNoise(Int(lower) + 1)
+        let blend = fraction * fraction * (3 - 2 * fraction)
+        return a + (b - a) * blend
+    }
+
     /// A stable per-calendar-day seed so a given date always varies identically.
     static func daySeed(for date: Date, calendar: Calendar) -> Int {
         calendar.ordinality(of: .day, in: .era, for: date) ?? 0

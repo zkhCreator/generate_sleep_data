@@ -24,10 +24,12 @@ protocol HealthDataWriting: AnyObject {
     func writeHRVData(for request: HRVWriteRequest) async throws -> HRVWriteResult
     func writeWorkoutData(for request: WorkoutGenerationRequest) async throws -> WorkoutWriteResult
     func writeStepData(for request: StepGenerationRequest) async throws -> StepWriteResult
+    func writeMenstrualData(for request: MenstrualGenerationRequest) async throws -> MenstrualWriteResult
     func deleteGeneratedSleepData(for request: SleepGenerationRequest) async throws -> SleepDeleteResult
     func deleteGeneratedHRVData(for request: HRVWriteRequest) async throws -> HRVDeleteResult
     func deleteGeneratedWorkoutData(for request: WorkoutGenerationRequest) async throws -> WorkoutDeleteResult
     func deleteGeneratedStepData(for request: StepGenerationRequest) async throws -> StepDeleteResult
+    func deleteGeneratedMenstrualData(for request: MenstrualGenerationRequest) async throws -> MenstrualDeleteResult
 }
 
 enum HealthAuthorizationState: Equatable {
@@ -88,17 +90,31 @@ struct StepDeleteResult: Equatable {
     let deletedSampleCount: Int
 }
 
+struct MenstrualWriteResult: Equatable {
+    let batchID: String
+    let sampleCount: Int
+    let cycleCount: Int
+    let firstDate: Date
+    let lastDate: Date
+}
+
+struct MenstrualDeleteResult: Equatable {
+    let deletedSampleCount: Int
+}
+
 enum HealthStoreError: LocalizedError {
     case healthDataUnavailable
     case sleepTypeUnavailable
     case hrvTypeUnavailable
     case workoutTypeUnavailable
     case stepTypeUnavailable
+    case menstrualTypeUnavailable
     case authorizationRequired
     case emptySleepRequest
     case emptyHRVRequest
     case emptyWorkoutRequest
     case emptyStepRequest
+    case emptyMenstrualRequest
 
     var errorDescription: String? {
         switch self {
@@ -112,6 +128,8 @@ enum HealthStoreError: LocalizedError {
             return "当前系统无法创建 workout 类型。"
         case .stepTypeUnavailable:
             return "当前系统无法创建 stepCount 类型。"
+        case .menstrualTypeUnavailable:
+            return "当前系统无法创建 menstrualFlow 类型。"
         case .authorizationRequired:
             return "没有拿到 Health 写入权限。"
         case .emptySleepRequest:
@@ -122,6 +140,8 @@ enum HealthStoreError: LocalizedError {
             return "没有可写入的锻炼数据。请检查天数和每周次数。"
         case .emptyStepRequest:
             return "没有可写入的步数数据。请检查天数和日均步数。"
+        case .emptyMenstrualRequest:
+            return "没有可写入的经期数据。请检查天数、周期长度和经期长度。"
         }
     }
 }
@@ -331,6 +351,41 @@ final class HealthKitStore: HealthDataWriting {
         )
     }
 
+    func writeMenstrualData(for request: MenstrualGenerationRequest) async throws -> MenstrualWriteResult {
+        guard HKHealthStore.isHealthDataAvailable() else {
+            throw HealthStoreError.healthDataUnavailable
+        }
+
+        guard authorizationStatus(for: .menstrual).isAuthorized else {
+            throw HealthStoreError.authorizationRequired
+        }
+
+        let menstrualType = try requireMenstrualType()
+        let daySamples = request.makeSamples()
+        guard let firstSample = daySamples.first, let lastSample = daySamples.last else {
+            throw HealthStoreError.emptyMenstrualRequest
+        }
+
+        let batchID = UUID().uuidString
+        let samples = makeMenstrualSamples(for: daySamples, menstrualType: menstrualType, batchID: batchID)
+        let cycleCount = daySamples.filter(\.isCycleStart).count
+        logMenstrualWrite(batchID: batchID, request: request, sampleCount: samples.count, cycleCount: cycleCount)
+
+        for chunk in stride(from: 0, to: samples.count, by: 1000) {
+            let upperBound = min(chunk + 1000, samples.count)
+            try await save(Array(samples[chunk..<upperBound]))
+        }
+        print("[HealthWrite][Menstrual] save succeeded. batchID=\(batchID) sampleCount=\(samples.count)")
+
+        return MenstrualWriteResult(
+            batchID: batchID,
+            sampleCount: samples.count,
+            cycleCount: cycleCount,
+            firstDate: firstSample.date,
+            lastDate: lastSample.date
+        )
+    }
+
     func deleteGeneratedSleepData(for request: SleepGenerationRequest) async throws -> SleepDeleteResult {
         guard HKHealthStore.isHealthDataAvailable() else {
             throw HealthStoreError.healthDataUnavailable
@@ -441,6 +496,33 @@ final class HealthKitStore: HealthDataWriting {
         return StepDeleteResult(deletedSampleCount: deletedSampleCount)
     }
 
+    func deleteGeneratedMenstrualData(for request: MenstrualGenerationRequest) async throws -> MenstrualDeleteResult {
+        guard HKHealthStore.isHealthDataAvailable() else {
+            throw HealthStoreError.healthDataUnavailable
+        }
+
+        guard authorizationStatus(for: .menstrual).isAuthorized else {
+            throw HealthStoreError.authorizationRequired
+        }
+
+        let menstrualType = try requireMenstrualType()
+        let daySamples = request.makeSamples()
+        guard let firstSample = daySamples.first, let lastSample = daySamples.last else {
+            throw HealthStoreError.emptyMenstrualRequest
+        }
+
+        let datePredicate = HKQuery.predicateForSamples(
+            withStart: firstSample.date,
+            end: lastSample.date.addingTimeInterval(24 * 60 * 60),
+            options: .strictStartDate
+        )
+        let metadataPredicate = HKQuery.predicateForObjects(withMetadataKey: Self.batchIDKey)
+        let predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [datePredicate, metadataPredicate])
+        let deletedSampleCount = try await deleteObjects(of: menstrualType, predicate: predicate)
+
+        return MenstrualDeleteResult(deletedSampleCount: deletedSampleCount)
+    }
+
     private func saveWorkout(session: WorkoutSession, batchID: String, index: Int) async throws {
         let configuration = HKWorkoutConfiguration()
         configuration.activityType = activityType(for: session.kind)
@@ -545,6 +627,8 @@ final class HealthKitStore: HealthDataWriting {
             return HKObjectType.workoutType()
         case .steps:
             return HKObjectType.quantityType(forIdentifier: .stepCount)
+        case .menstrual:
+            return HKObjectType.categoryType(forIdentifier: .menstrualFlow)
         }
     }
 
@@ -559,6 +643,8 @@ final class HealthKitStore: HealthDataWriting {
                 throw HealthStoreError.workoutTypeUnavailable
             case .steps:
                 throw HealthStoreError.stepTypeUnavailable
+            case .menstrual:
+                throw HealthStoreError.menstrualTypeUnavailable
             }
         }
 
@@ -567,7 +653,7 @@ final class HealthKitStore: HealthDataWriting {
 
     private func shareTypes(for mode: HealthDataMode) throws -> Set<HKSampleType> {
         switch mode {
-        case .sleep, .hrv, .steps:
+        case .sleep, .hrv, .steps, .menstrual:
             return [try requireSampleType(for: mode)]
         case .workout:
             var types: Set<HKSampleType> = [HKObjectType.workoutType()]
@@ -608,6 +694,51 @@ final class HealthKitStore: HealthDataWriting {
         }
 
         return stepType
+    }
+
+    private func requireMenstrualType() throws -> HKCategoryType {
+        guard let menstrualType = HKObjectType.categoryType(forIdentifier: .menstrualFlow) else {
+            throw HealthStoreError.menstrualTypeUnavailable
+        }
+
+        return menstrualType
+    }
+
+    private func makeMenstrualSamples(
+        for daySamples: [MenstrualDaySample],
+        menstrualType: HKCategoryType,
+        batchID: String
+    ) -> [HKCategorySample] {
+        let calendar = Calendar.current
+        return daySamples.enumerated().map { index, daySample in
+            let start = calendar.startOfDay(for: daySample.date)
+            let end = calendar.date(byAdding: .day, value: 1, to: start) ?? start.addingTimeInterval(24 * 60 * 60)
+            return HKCategorySample(
+                type: menstrualType,
+                value: menstrualFlowValue(for: daySample.flow).rawValue,
+                start: start,
+                end: end,
+                metadata: [
+                    HKMetadataKeyWasUserEntered: true,
+                    // Required for menstrualFlow samples; marks the first day of a cycle.
+                    HKMetadataKeyMenstrualCycleStart: daySample.isCycleStart,
+                    Self.batchIDKey: batchID,
+                    Self.sampleKindKey: "menstrualFlow",
+                    "io.tuist.generate-sleep-data.day-index": index,
+                ]
+            )
+        }
+    }
+
+    private func menstrualFlowValue(for flow: MenstrualFlowLevel) -> HKCategoryValueMenstrualFlow {
+        switch flow {
+        case .light:
+            return .light
+        case .medium:
+            return .medium
+        case .heavy:
+            return .heavy
+        }
     }
 
     private func makeStepSamples(
@@ -796,6 +927,26 @@ final class HealthKitStore: HealthDataWriting {
             days=\(request.days)
             averageStepsPerDay=\(request.averageStepsPerDay)
             dayCount=\(sessions.count)
+            sampleCount=\(sampleCount)
+            """
+        )
+    }
+
+    private func logMenstrualWrite(
+        batchID: String,
+        request: MenstrualGenerationRequest,
+        sampleCount: Int,
+        cycleCount: Int
+    ) {
+        print(
+            """
+            [HealthWrite][Menstrual] preparing save.
+            batchID=\(batchID)
+            endDate=\(Self.consoleDateFormatter.string(from: request.endDate))
+            days=\(request.days)
+            cycleLength=\(request.cycleLength)
+            periodLength=\(request.periodLength)
+            cycleCount=\(cycleCount)
             sampleCount=\(sampleCount)
             """
         )

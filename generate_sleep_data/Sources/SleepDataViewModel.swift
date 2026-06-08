@@ -21,6 +21,7 @@ final class SleepDataViewModel: ObservableObject {
     @Published var hrvRequest: HRVWriteRequest
     @Published var workoutRequest: WorkoutGenerationRequest
     @Published var stepRequest: StepGenerationRequest
+    @Published var menstrualRequest: MenstrualGenerationRequest
     @Published private(set) var authorizationState: HealthAuthorizationState
     @Published private(set) var isWorking = false
     @Published private(set) var statusMessage: String?
@@ -42,6 +43,7 @@ final class SleepDataViewModel: ObservableObject {
         self.hrvRequest = HRVWriteRequest.default(calendar: calendar, now: now())
         self.workoutRequest = WorkoutGenerationRequest.default(calendar: calendar, now: now())
         self.stepRequest = StepGenerationRequest.default(calendar: calendar, now: now())
+        self.menstrualRequest = MenstrualGenerationRequest.default(calendar: calendar, now: now())
         self.authorizationState = healthStore.authorizationStatus(for: .sleep)
     }
 
@@ -100,6 +102,8 @@ final class SleepDataViewModel: ObservableObject {
                 return "现在可以把生成的锻炼记录直接写入到 Apple Health。"
             case .steps:
                 return "现在可以把生成的步数记录直接写入到 Apple Health。"
+            case .menstrual:
+                return "现在可以把生成的经期记录直接写入到 Apple Health。"
             }
         case .sharingDenied:
             return "请到系统设置里的 Health 权限页重新打开写入权限。"
@@ -113,6 +117,8 @@ final class SleepDataViewModel: ObservableObject {
                 return "首次写入前会弹出系统授权框，申请 workout、活动能量与距离的写入权限。"
             case .steps:
                 return "首次写入前会弹出系统授权框，只申请 stepCount 写入权限。"
+            case .menstrual:
+                return "首次写入前会弹出系统授权框，只申请 menstrualFlow 写入权限。"
             }
         case .unavailable:
             return "HealthKit 不支持当前运行环境。请在已开启 Health 的 iPhone 真机上运行。"
@@ -129,6 +135,8 @@ final class SleepDataViewModel: ObservableObject {
             return authorizationState.isAuthorized ? "写入锻炼记录到 Health" : "授权并写入锻炼记录到 Health"
         case .steps:
             return authorizationState.isAuthorized ? "写入步数记录到 Health" : "授权并写入步数记录到 Health"
+        case .menstrual:
+            return authorizationState.isAuthorized ? "写入经期记录到 Health" : "授权并写入经期记录到 Health"
         }
     }
 
@@ -150,6 +158,10 @@ final class SleepDataViewModel: ObservableObject {
 
     var showsStepControls: Bool {
         selectedMode == .steps
+    }
+
+    var showsMenstrualControls: Bool {
+        selectedMode == .menstrual
     }
 
     var showsClearButton: Bool {
@@ -259,6 +271,17 @@ final class SleepDataViewModel: ObservableObject {
         return "将写入 \(sessions.count) 天、共 \(sampleCount) 条 sample，总计约 \(totalSteps) 步。时间范围：\(rangeText)。"
     }
 
+    var menstrualScheduleSummary: String {
+        let samples = menstrualRequest.makeSamples(calendar: calendar)
+        guard let first = samples.first, let last = samples.last else {
+            return "请检查天数、周期长度和经期长度。"
+        }
+
+        let cycleCount = samples.filter(\.isCycleStart).count
+        let rangeText = "\(Self.dateFormatter.string(from: first.date)) 到 \(Self.dateFormatter.string(from: last.date))"
+        return "将写入 \(cycleCount) 个周期、共 \(samples.count) 天经期记录。时间范围：\(rangeText)。"
+    }
+
     var clearConfirmationMessage: String {
         switch selectedMode {
         case .hrv:
@@ -267,6 +290,8 @@ final class SleepDataViewModel: ObservableObject {
             return "会删除当前时间范围内、由本 app 写入的锻炼记录。不会影响其他来源的运动数据。\(workoutRequestRangeText)"
         case .steps:
             return "会删除当前时间范围内、由本 app 写入的步数记录。不会影响其他来源的步数数据。\(stepRequestRangeText)"
+        case .menstrual:
+            return "会删除当前时间范围内、由本 app 写入的经期记录。不会影响其他来源的经期数据。\(menstrualRequestRangeText)"
         default:
             return "会删除当前时间范围内、由本 app 写入的 sleepAnalysis 数据。不会影响其他来源的睡眠记录。\(sleepRequestRangeText)"
         }
@@ -282,6 +307,9 @@ final class SleepDataViewModel: ObservableObject {
         }
         if mode == .steps {
             stepRequest.endDate = calendar.startOfDay(for: now())
+        }
+        if mode == .menstrual {
+            menstrualRequest.endDate = calendar.startOfDay(for: now())
         }
         authorizationState = healthStore.authorizationStatus(for: mode)
         statusMessage = nil
@@ -308,6 +336,11 @@ final class SleepDataViewModel: ObservableObject {
 
     func apply(_ preset: StepPreset) {
         preset.apply(to: &stepRequest, calendar: calendar, now: now())
+        statusMessage = nil
+    }
+
+    func apply(_ preset: MenstrualPreset) {
+        preset.apply(to: &menstrualRequest, calendar: calendar, now: now())
         statusMessage = nil
     }
 
@@ -338,6 +371,8 @@ final class SleepDataViewModel: ObservableObject {
             await generateWorkoutData()
         case .steps:
             await generateStepData()
+        case .menstrual:
+            await generateMenstrualData()
         }
     }
 
@@ -349,6 +384,8 @@ final class SleepDataViewModel: ObservableObject {
             await deleteWorkoutData()
         case .steps:
             await deleteStepData()
+        case .menstrual:
+            await deleteMenstrualData()
         default:
             await deleteSleepData()
         }
@@ -513,6 +550,51 @@ final class SleepDataViewModel: ObservableObject {
         }
     }
 
+    func generateMenstrualData() async {
+        guard !isWorking else {
+            return
+        }
+
+        isWorking = true
+        statusMessage = nil
+        defer { isWorking = false }
+
+        do {
+            try await ensureAuthorization(for: .menstrual)
+
+            let result = try await healthStore.writeMenstrualData(for: menstrualRequest)
+            let rangeText = "\(Self.dateFormatter.string(from: result.firstDate)) 到 \(Self.dateFormatter.string(from: result.lastDate))"
+            statusMessage = "已写入 \(result.cycleCount) 个周期、共 \(result.sampleCount) 天经期记录。时间范围：\(rangeText)。批次 ID：\(result.batchID.prefix(8))。"
+        } catch {
+            authorizationState = healthStore.authorizationStatus(for: .menstrual)
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    func deleteMenstrualData() async {
+        guard !isWorking else {
+            return
+        }
+
+        isWorking = true
+        statusMessage = nil
+        defer { isWorking = false }
+
+        do {
+            try await ensureAuthorization(for: .menstrual)
+
+            let result = try await healthStore.deleteGeneratedMenstrualData(for: menstrualRequest)
+            if result.deletedSampleCount == 0 {
+                statusMessage = "当前范围内没有找到由本 app 写入的经期记录。\(menstrualRequestRangeText)。"
+            } else {
+                statusMessage = "已删除 \(result.deletedSampleCount) 天经期记录。\(menstrualRequestRangeText)。"
+            }
+        } catch {
+            authorizationState = healthStore.authorizationStatus(for: .menstrual)
+            statusMessage = error.localizedDescription
+        }
+    }
+
     func deleteSleepData() async {
         guard !isWorking else {
             return
@@ -588,6 +670,15 @@ final class SleepDataViewModel: ObservableObject {
         }
 
         return "时间范围：\(Self.dateFormatter.string(from: first)) 到 \(Self.dateFormatter.string(from: last))"
+    }
+
+    private var menstrualRequestRangeText: String {
+        let samples = menstrualRequest.makeSamples(calendar: calendar)
+        guard let first = samples.first, let last = samples.last else {
+            return "时间范围：未知"
+        }
+
+        return "时间范围：\(Self.dateFormatter.string(from: first.date)) 到 \(Self.dateFormatter.string(from: last.date))"
     }
 
     private static let dateTimeFormatter: DateFormatter = {

@@ -210,13 +210,14 @@ final class GenerateSleepDataTests: XCTestCase {
             XCTAssertLessThan(previous.date, current.date)
         }
 
-        // Every reading stays within the level's variation band around the baseline.
+        // Every reading stays within a plausible band: drift + jitter can reach
+        // about 1.4× the level's typical swing on a peak day.
         for sample in samples {
-            XCTAssertEqual(sample.valueMilliseconds, 82, accuracy: HRVPreset.tooHigh.variationMilliseconds)
+            XCTAssertEqual(sample.valueMilliseconds, 82, accuracy: HRVPreset.tooHigh.variationMilliseconds * 1.5)
         }
 
-        // And the readings actually fluctuate rather than repeating one value.
-        XCTAssertGreaterThan(Set(samples.map(\.valueMilliseconds)).count, 1)
+        // The readings should be lively, not a flat line jittering by ±1.
+        XCTAssertGreaterThan(Set(samples.map(\.valueMilliseconds)).count, 8)
     }
 
     func test_hrvMakeSamples_singleDayMatchesTodaySampleDate() throws {
@@ -278,6 +279,64 @@ final class GenerateSleepDataTests: XCTestCase {
         )
 
         XCTAssertTrue(request.makeSessions(calendar: calendar).isEmpty)
+    }
+
+    func test_defaultMenstrualRequest_coversOneYearOfRegularCycles() {
+        let now = makeDate(year: 2026, month: 4, day: 11, hour: 9, minute: 30)
+
+        let request = MenstrualGenerationRequest.default(calendar: calendar, now: now)
+
+        XCTAssertEqual(request.endDate, makeDate(year: 2026, month: 4, day: 11, hour: 0, minute: 0))
+        XCTAssertEqual(request.days, 365)
+        XCTAssertEqual(request.cycleLength, 28)
+        XCTAssertEqual(request.periodLength, 5)
+
+        let samples = request.makeSamples(calendar: calendar)
+        let cycleStarts = samples.filter(\.isCycleStart).count
+        // ~365 / 28 ≈ 13 cycles, each contributing ~5 flow days.
+        XCTAssertGreaterThan(cycleStarts, 10)
+        XCTAssertLessThan(cycleStarts, 16)
+        XCTAssertGreaterThan(samples.count, cycleStarts)
+    }
+
+    func test_menstrualMakeSamples_isOrderedNonOverlappingAndMarksCycleStarts() throws {
+        let request = MenstrualGenerationRequest(
+            endDate: makeDate(year: 2026, month: 4, day: 11, hour: 0, minute: 0),
+            days: 84,
+            cycleLength: 28,
+            periodLength: 5
+        )
+
+        let samples = request.makeSamples(calendar: calendar)
+        XCTAssertFalse(samples.isEmpty)
+        XCTAssertGreaterThan(samples.filter(\.isCycleStart).count, 1)
+
+        let windowStart = makeDate(year: 2026, month: 1, day: 18, hour: 0, minute: 0)
+        for sample in samples {
+            XCTAssertGreaterThanOrEqual(sample.date, windowStart)
+            XCTAssertLessThanOrEqual(sample.date, makeDate(year: 2026, month: 4, day: 11, hour: 0, minute: 0))
+        }
+
+        // Days are strictly increasing (one record per day, no overlap).
+        for (previous, current) in zip(samples, samples.dropFirst()) {
+            XCTAssertLessThan(previous.date, current.date)
+        }
+
+        // The first day of every period is the one flagged as a cycle start.
+        for sample in samples where sample.isCycleStart {
+            XCTAssertEqual(sample.flow, .medium)
+        }
+    }
+
+    func test_menstrualMakeSamples_invalidConfigProducesNothing() {
+        let request = MenstrualGenerationRequest(
+            endDate: makeDate(year: 2026, month: 4, day: 11, hour: 0, minute: 0),
+            days: 90,
+            cycleLength: 4,
+            periodLength: 5
+        )
+
+        XCTAssertTrue(request.makeSamples(calendar: calendar).isEmpty)
     }
 
     private var calendar: Calendar {
