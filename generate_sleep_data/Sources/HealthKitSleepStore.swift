@@ -22,7 +22,12 @@ protocol HealthDataWriting: AnyObject {
     func requestAuthorization(for mode: HealthDataMode) async throws -> HealthAuthorizationState
     func writeSleepData(for request: SleepGenerationRequest) async throws -> SleepWriteResult
     func writeHRVData(for request: HRVWriteRequest) async throws -> HRVWriteResult
+    func writeWorkoutData(for request: WorkoutGenerationRequest) async throws -> WorkoutWriteResult
+    func writeStepData(for request: StepGenerationRequest) async throws -> StepWriteResult
     func deleteGeneratedSleepData(for request: SleepGenerationRequest) async throws -> SleepDeleteResult
+    func deleteGeneratedHRVData(for request: HRVWriteRequest) async throws -> HRVDeleteResult
+    func deleteGeneratedWorkoutData(for request: WorkoutGenerationRequest) async throws -> WorkoutDeleteResult
+    func deleteGeneratedStepData(for request: StepGenerationRequest) async throws -> StepDeleteResult
 }
 
 enum HealthAuthorizationState: Equatable {
@@ -43,12 +48,43 @@ struct SleepWriteResult: Equatable {
 }
 
 struct HRVWriteResult: Equatable {
+    let batchID: String
     let sampleCount: Int
-    let valueMilliseconds: Double
-    let sampleDate: Date
+    let baselineMilliseconds: Double
+    let firstDate: Date
+    let lastDate: Date
+}
+
+struct HRVDeleteResult: Equatable {
+    let deletedSampleCount: Int
 }
 
 struct SleepDeleteResult: Equatable {
+    let deletedSampleCount: Int
+}
+
+struct WorkoutWriteResult: Equatable {
+    let batchID: String
+    let workoutCount: Int
+    let totalKilocalories: Double
+    let firstStart: Date
+    let lastEnd: Date
+}
+
+struct WorkoutDeleteResult: Equatable {
+    let deletedWorkoutCount: Int
+}
+
+struct StepWriteResult: Equatable {
+    let batchID: String
+    let dayCount: Int
+    let sampleCount: Int
+    let totalSteps: Int
+    let firstStart: Date
+    let lastEnd: Date
+}
+
+struct StepDeleteResult: Equatable {
     let deletedSampleCount: Int
 }
 
@@ -56,8 +92,13 @@ enum HealthStoreError: LocalizedError {
     case healthDataUnavailable
     case sleepTypeUnavailable
     case hrvTypeUnavailable
+    case workoutTypeUnavailable
+    case stepTypeUnavailable
     case authorizationRequired
     case emptySleepRequest
+    case emptyHRVRequest
+    case emptyWorkoutRequest
+    case emptyStepRequest
 
     var errorDescription: String? {
         switch self {
@@ -67,10 +108,20 @@ enum HealthStoreError: LocalizedError {
             return "当前系统无法创建 sleepAnalysis 类型。"
         case .hrvTypeUnavailable:
             return "当前系统无法创建 HRV 类型。"
+        case .workoutTypeUnavailable:
+            return "当前系统无法创建 workout 类型。"
+        case .stepTypeUnavailable:
+            return "当前系统无法创建 stepCount 类型。"
         case .authorizationRequired:
             return "没有拿到 Health 写入权限。"
         case .emptySleepRequest:
             return "没有可写入的 sleep data。请检查晚数和睡眠时长。"
+        case .emptyHRVRequest:
+            return "没有可写入的 HRV 数据。请检查天数设置。"
+        case .emptyWorkoutRequest:
+            return "没有可写入的锻炼数据。请检查天数和每周次数。"
+        case .emptyStepRequest:
+            return "没有可写入的步数数据。请检查天数和日均步数。"
         }
     }
 }
@@ -111,7 +162,7 @@ final class HealthKitStore: HealthDataWriting {
             throw HealthStoreError.healthDataUnavailable
         }
 
-        let shareTypes: Set<HKSampleType> = [try requireSampleType(for: mode)]
+        let shareTypes = try shareTypes(for: mode)
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             healthStore.requestAuthorization(toShare: shareTypes, read: nil) { success, error in
@@ -150,7 +201,10 @@ final class HealthKitStore: HealthDataWriting {
         let batchID = UUID().uuidString
         let samples = makeSleepSamples(for: sessions, sleepType: sleepType, batchID: batchID)
         logSleepWrite(batchID: batchID, request: request, sessions: sessions, sampleCount: samples.count)
-        try await save(samples)
+        for chunk in stride(from: 0, to: samples.count, by: 1000) {
+            let upperBound = min(chunk + 1000, samples.count)
+            try await save(Array(samples[chunk..<upperBound]))
+        }
         print("[HealthWrite][Sleep] save succeeded. batchID=\(batchID) sampleCount=\(samples.count)")
 
         return SleepWriteResult(
@@ -170,29 +224,110 @@ final class HealthKitStore: HealthDataWriting {
         }
 
         let hrvType = try requireHRVType()
-        let sampleDate = request.sampleDate()
-        let quantity = HKQuantity(
-            unit: HKUnit.secondUnit(with: .milli),
-            doubleValue: request.valueMilliseconds
-        )
-        let sample = HKQuantitySample(
-            type: hrvType,
-            quantity: quantity,
-            start: sampleDate,
-            end: sampleDate,
-            metadata: [
-                HKMetadataKeyWasUserEntered: true,
-                Self.sampleKindKey: "hrv",
-            ]
-        )
-        logHRVWrite(request: request, sampleDate: sampleDate)
-        try await save([sample])
-        print("[HealthWrite][HRV] save succeeded. sampleCount=1")
+        let daySamples = request.makeSamples()
+        guard let firstSample = daySamples.first, let lastSample = daySamples.last else {
+            throw HealthStoreError.emptyHRVRequest
+        }
+
+        let batchID = UUID().uuidString
+        let unit = HKUnit.secondUnit(with: .milli)
+        let samples = daySamples.map { daySample in
+            HKQuantitySample(
+                type: hrvType,
+                quantity: HKQuantity(unit: unit, doubleValue: daySample.valueMilliseconds),
+                start: daySample.date,
+                end: daySample.date,
+                metadata: [
+                    HKMetadataKeyWasUserEntered: true,
+                    Self.batchIDKey: batchID,
+                    Self.sampleKindKey: "hrv",
+                ]
+            )
+        }
+        logHRVWrite(batchID: batchID, request: request, sampleCount: samples.count)
+
+        for chunk in stride(from: 0, to: samples.count, by: 1000) {
+            let upperBound = min(chunk + 1000, samples.count)
+            try await save(Array(samples[chunk..<upperBound]))
+        }
+        print("[HealthWrite][HRV] save succeeded. batchID=\(batchID) sampleCount=\(samples.count)")
 
         return HRVWriteResult(
-            sampleCount: 1,
-            valueMilliseconds: request.valueMilliseconds,
-            sampleDate: sampleDate
+            batchID: batchID,
+            sampleCount: samples.count,
+            baselineMilliseconds: request.valueMilliseconds,
+            firstDate: firstSample.date,
+            lastDate: lastSample.date
+        )
+    }
+
+    func writeWorkoutData(for request: WorkoutGenerationRequest) async throws -> WorkoutWriteResult {
+        guard HKHealthStore.isHealthDataAvailable() else {
+            throw HealthStoreError.healthDataUnavailable
+        }
+
+        guard authorizationStatus(for: .workout).isAuthorized else {
+            throw HealthStoreError.authorizationRequired
+        }
+
+        let sessions = request.makeSessions()
+        guard let firstSession = sessions.first, let lastSession = sessions.last else {
+            throw HealthStoreError.emptyWorkoutRequest
+        }
+
+        let batchID = UUID().uuidString
+        logWorkoutWrite(batchID: batchID, request: request, sessions: sessions)
+
+        for (index, session) in sessions.enumerated() {
+            try await saveWorkout(session: session, batchID: batchID, index: index)
+        }
+
+        print("[HealthWrite][Workout] save succeeded. batchID=\(batchID) workoutCount=\(sessions.count)")
+
+        return WorkoutWriteResult(
+            batchID: batchID,
+            workoutCount: sessions.count,
+            totalKilocalories: sessions.reduce(0) { $0 + $1.kilocalories },
+            firstStart: firstSession.start,
+            lastEnd: lastSession.end
+        )
+    }
+
+    func writeStepData(for request: StepGenerationRequest) async throws -> StepWriteResult {
+        guard HKHealthStore.isHealthDataAvailable() else {
+            throw HealthStoreError.healthDataUnavailable
+        }
+
+        guard authorizationStatus(for: .steps).isAuthorized else {
+            throw HealthStoreError.authorizationRequired
+        }
+
+        let stepType = try requireStepType()
+        let sessions = request.makeSessions()
+        guard let firstSession = sessions.first, let lastSession = sessions.last,
+              let firstStart = firstSession.samples.first?.interval.start,
+              let lastEnd = lastSession.samples.last?.interval.end else {
+            throw HealthStoreError.emptyStepRequest
+        }
+
+        let batchID = UUID().uuidString
+        let samples = makeStepSamples(for: sessions, stepType: stepType, batchID: batchID)
+        logStepWrite(batchID: batchID, request: request, sessions: sessions, sampleCount: samples.count)
+
+        // Chunk the save so a full year (~5000 samples) stays within a sane batch size.
+        for chunk in stride(from: 0, to: samples.count, by: 1000) {
+            let upperBound = min(chunk + 1000, samples.count)
+            try await save(Array(samples[chunk..<upperBound]))
+        }
+        print("[HealthWrite][Steps] save succeeded. batchID=\(batchID) sampleCount=\(samples.count)")
+
+        return StepWriteResult(
+            batchID: batchID,
+            dayCount: sessions.count,
+            sampleCount: samples.count,
+            totalSteps: sessions.reduce(0) { $0 + $1.totalSteps },
+            firstStart: firstStart,
+            lastEnd: lastEnd
         )
     }
 
@@ -223,12 +358,193 @@ final class HealthKitStore: HealthDataWriting {
         return SleepDeleteResult(deletedSampleCount: deletedSampleCount)
     }
 
+    func deleteGeneratedHRVData(for request: HRVWriteRequest) async throws -> HRVDeleteResult {
+        guard HKHealthStore.isHealthDataAvailable() else {
+            throw HealthStoreError.healthDataUnavailable
+        }
+
+        guard authorizationStatus(for: .hrv).isAuthorized else {
+            throw HealthStoreError.authorizationRequired
+        }
+
+        let hrvType = try requireHRVType()
+        let daySamples = request.makeSamples()
+        guard let firstSample = daySamples.first, let lastSample = daySamples.last else {
+            throw HealthStoreError.emptyHRVRequest
+        }
+
+        // HRV samples are instantaneous, so nudge the end out by a minute to make
+        // sure the final day's reading is inside the range.
+        let datePredicate = HKQuery.predicateForSamples(
+            withStart: firstSample.date,
+            end: lastSample.date.addingTimeInterval(60),
+            options: .strictStartDate
+        )
+        let metadataPredicate = HKQuery.predicateForObjects(withMetadataKey: Self.batchIDKey)
+        let predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [datePredicate, metadataPredicate])
+        let deletedSampleCount = try await deleteObjects(of: hrvType, predicate: predicate)
+
+        return HRVDeleteResult(deletedSampleCount: deletedSampleCount)
+    }
+
+    func deleteGeneratedWorkoutData(for request: WorkoutGenerationRequest) async throws -> WorkoutDeleteResult {
+        guard HKHealthStore.isHealthDataAvailable() else {
+            throw HealthStoreError.healthDataUnavailable
+        }
+
+        guard authorizationStatus(for: .workout).isAuthorized else {
+            throw HealthStoreError.authorizationRequired
+        }
+
+        let sessions = request.makeSessions()
+        guard let firstSession = sessions.first, let lastSession = sessions.last else {
+            throw HealthStoreError.emptyWorkoutRequest
+        }
+
+        let datePredicate = HKQuery.predicateForSamples(
+            withStart: firstSession.start,
+            end: lastSession.end,
+            options: .strictStartDate
+        )
+        let metadataPredicate = HKQuery.predicateForObjects(withMetadataKey: Self.batchIDKey)
+        let predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [datePredicate, metadataPredicate])
+        let deletedWorkoutCount = try await deleteObjects(of: HKObjectType.workoutType(), predicate: predicate)
+
+        return WorkoutDeleteResult(deletedWorkoutCount: deletedWorkoutCount)
+    }
+
+    func deleteGeneratedStepData(for request: StepGenerationRequest) async throws -> StepDeleteResult {
+        guard HKHealthStore.isHealthDataAvailable() else {
+            throw HealthStoreError.healthDataUnavailable
+        }
+
+        guard authorizationStatus(for: .steps).isAuthorized else {
+            throw HealthStoreError.authorizationRequired
+        }
+
+        let stepType = try requireStepType()
+        let sessions = request.makeSessions()
+        guard let firstStart = sessions.first?.samples.first?.interval.start,
+              let lastEnd = sessions.last?.samples.last?.interval.end else {
+            throw HealthStoreError.emptyStepRequest
+        }
+
+        let datePredicate = HKQuery.predicateForSamples(
+            withStart: firstStart,
+            end: lastEnd,
+            options: .strictStartDate
+        )
+        let metadataPredicate = HKQuery.predicateForObjects(withMetadataKey: Self.batchIDKey)
+        let predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [datePredicate, metadataPredicate])
+        let deletedSampleCount = try await deleteObjects(of: stepType, predicate: predicate)
+
+        return StepDeleteResult(deletedSampleCount: deletedSampleCount)
+    }
+
+    private func saveWorkout(session: WorkoutSession, batchID: String, index: Int) async throws {
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = activityType(for: session.kind)
+
+        let builder = HKWorkoutBuilder(
+            healthStore: healthStore,
+            configuration: configuration,
+            device: nil
+        )
+
+        try await builder.beginCollection(at: session.start)
+
+        try await builder.addMetadata([
+            HKMetadataKeyWasUserEntered: true,
+            Self.batchIDKey: batchID,
+            Self.sampleKindKey: "workout",
+            "io.tuist.generate-sleep-data.session-index": index,
+            "io.tuist.generate-sleep-data.workout-kind": session.kind.rawValue,
+        ])
+
+        var samples: [HKSample] = []
+
+        if session.kilocalories > 0,
+           let energyType = HKObjectType.quantityType(forIdentifier: .activeEnergyBurned) {
+            let energy = HKQuantity(unit: .kilocalorie(), doubleValue: session.kilocalories)
+            samples.append(
+                HKQuantitySample(
+                    type: energyType,
+                    quantity: energy,
+                    start: session.start,
+                    end: session.end
+                )
+            )
+        }
+
+        if let distanceMeters = session.distanceMeters,
+           distanceMeters > 0,
+           let distanceType = distanceQuantityType(for: session.kind) {
+            let distance = HKQuantity(unit: .meter(), doubleValue: distanceMeters)
+            samples.append(
+                HKQuantitySample(
+                    type: distanceType,
+                    quantity: distance,
+                    start: session.start,
+                    end: session.end
+                )
+            )
+        }
+
+        if !samples.isEmpty {
+            try await builder.addSamples(samples)
+        }
+
+        try await builder.endCollection(at: session.end)
+        _ = try await builder.finishWorkout()
+    }
+
+    private func activityType(for kind: WorkoutKind) -> HKWorkoutActivityType {
+        switch kind {
+        case .running:
+            return .running
+        case .walking:
+            return .walking
+        case .cycling:
+            return .cycling
+        case .strength:
+            return .functionalStrengthTraining
+        case .hiking:
+            return .hiking
+        case .yoga:
+            return .yoga
+        case .swimming:
+            return .swimming
+        }
+    }
+
+    private func distanceQuantityType(for kind: WorkoutKind) -> HKQuantityType? {
+        guard let distanceKind = kind.distanceKind else {
+            return nil
+        }
+
+        let identifier: HKQuantityTypeIdentifier
+        switch distanceKind {
+        case .walkingRunning:
+            identifier = .distanceWalkingRunning
+        case .cycling:
+            identifier = .distanceCycling
+        case .swimming:
+            identifier = .distanceSwimming
+        }
+
+        return HKObjectType.quantityType(forIdentifier: identifier)
+    }
+
     private func sampleType(for mode: HealthDataMode) -> HKSampleType? {
         switch mode {
         case .sleep:
             return HKObjectType.categoryType(forIdentifier: .sleepAnalysis)
         case .hrv:
             return HKObjectType.quantityType(forIdentifier: .heartRateVariabilitySDNN)
+        case .workout:
+            return HKObjectType.workoutType()
+        case .steps:
+            return HKObjectType.quantityType(forIdentifier: .stepCount)
         }
     }
 
@@ -239,10 +555,35 @@ final class HealthKitStore: HealthDataWriting {
                 throw HealthStoreError.sleepTypeUnavailable
             case .hrv:
                 throw HealthStoreError.hrvTypeUnavailable
+            case .workout:
+                throw HealthStoreError.workoutTypeUnavailable
+            case .steps:
+                throw HealthStoreError.stepTypeUnavailable
             }
         }
 
         return sampleType
+    }
+
+    private func shareTypes(for mode: HealthDataMode) throws -> Set<HKSampleType> {
+        switch mode {
+        case .sleep, .hrv, .steps:
+            return [try requireSampleType(for: mode)]
+        case .workout:
+            var types: Set<HKSampleType> = [HKObjectType.workoutType()]
+            let quantityIdentifiers: [HKQuantityTypeIdentifier] = [
+                .activeEnergyBurned,
+                .distanceWalkingRunning,
+                .distanceCycling,
+                .distanceSwimming,
+            ]
+            for identifier in quantityIdentifiers {
+                if let type = HKObjectType.quantityType(forIdentifier: identifier) {
+                    types.insert(type)
+                }
+            }
+            return types
+        }
     }
 
     private func requireSleepType() throws -> HKCategoryType {
@@ -259,6 +600,38 @@ final class HealthKitStore: HealthDataWriting {
         }
 
         return hrvType
+    }
+
+    private func requireStepType() throws -> HKQuantityType {
+        guard let stepType = HKObjectType.quantityType(forIdentifier: .stepCount) else {
+            throw HealthStoreError.stepTypeUnavailable
+        }
+
+        return stepType
+    }
+
+    private func makeStepSamples(
+        for sessions: [StepDaySession],
+        stepType: HKQuantityType,
+        batchID: String
+    ) -> [HKQuantitySample] {
+        sessions.enumerated().flatMap { dayIndex, session in
+            session.samples.enumerated().map { hourIndex, sample in
+                HKQuantitySample(
+                    type: stepType,
+                    quantity: HKQuantity(unit: .count(), doubleValue: Double(sample.steps)),
+                    start: sample.interval.start,
+                    end: sample.interval.end,
+                    metadata: [
+                        HKMetadataKeyWasUserEntered: true,
+                        Self.batchIDKey: batchID,
+                        Self.sampleKindKey: "stepCount",
+                        "io.tuist.generate-sleep-data.day-index": dayIndex,
+                        "io.tuist.generate-sleep-data.hour-index": hourIndex,
+                    ]
+                )
+            }
+        }
     }
 
     private func makeSleepSamples(
@@ -376,16 +749,54 @@ final class HealthKitStore: HealthDataWriting {
         }
     }
 
-    private func logHRVWrite(request: HRVWriteRequest, sampleDate: Date) {
+    private func logHRVWrite(batchID: String, request: HRVWriteRequest, sampleCount: Int) {
         print(
             """
             [HealthWrite][HRV] preparing save.
+            batchID=\(batchID)
             preset=\(request.preset.rawValue)
             state=\(request.preset.title)
             recordDate=\(Self.consoleDateFormatter.string(from: request.recordDate))
             sampleTime=\(Self.consoleTimeFormatter.string(from: request.sampleTime))
-            sampleDate=\(Self.consoleDateTimeFormatter.string(from: sampleDate))
-            valueMilliseconds=\(request.valueMilliseconds)
+            days=\(request.days)
+            baselineMilliseconds=\(request.valueMilliseconds)
+            sampleCount=\(sampleCount)
+            """
+        )
+    }
+
+    private func logWorkoutWrite(
+        batchID: String,
+        request: WorkoutGenerationRequest,
+        sessions: [WorkoutSession]
+    ) {
+        print(
+            """
+            [HealthWrite][Workout] preparing save.
+            batchID=\(batchID)
+            endDate=\(Self.consoleDateFormatter.string(from: request.endDate))
+            days=\(request.days)
+            workoutsPerWeek=\(request.workoutsPerWeek)
+            workoutCount=\(sessions.count)
+            """
+        )
+    }
+
+    private func logStepWrite(
+        batchID: String,
+        request: StepGenerationRequest,
+        sessions: [StepDaySession],
+        sampleCount: Int
+    ) {
+        print(
+            """
+            [HealthWrite][Steps] preparing save.
+            batchID=\(batchID)
+            endDate=\(Self.consoleDateFormatter.string(from: request.endDate))
+            days=\(request.days)
+            averageStepsPerDay=\(request.averageStepsPerDay)
+            dayCount=\(sessions.count)
+            sampleCount=\(sampleCount)
             """
         )
     }

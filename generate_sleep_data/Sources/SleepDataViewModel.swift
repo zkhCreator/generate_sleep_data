@@ -19,6 +19,8 @@ final class SleepDataViewModel: ObservableObject {
     @Published var selectedMode: HealthDataMode
     @Published var request: SleepGenerationRequest
     @Published var hrvRequest: HRVWriteRequest
+    @Published var workoutRequest: WorkoutGenerationRequest
+    @Published var stepRequest: StepGenerationRequest
     @Published private(set) var authorizationState: HealthAuthorizationState
     @Published private(set) var isWorking = false
     @Published private(set) var statusMessage: String?
@@ -38,6 +40,8 @@ final class SleepDataViewModel: ObservableObject {
         self.selectedMode = .sleep
         self.request = SleepGenerationRequest.default(calendar: calendar, now: now())
         self.hrvRequest = HRVWriteRequest.default(calendar: calendar, now: now())
+        self.workoutRequest = WorkoutGenerationRequest.default(calendar: calendar, now: now())
+        self.stepRequest = StepGenerationRequest.default(calendar: calendar, now: now())
         self.authorizationState = healthStore.authorizationStatus(for: .sleep)
     }
 
@@ -92,6 +96,10 @@ final class SleepDataViewModel: ObservableObject {
                 return "现在可以把生成的 sleep data 直接写入到 Apple Health。"
             case .hrv:
                 return "现在可以把今天的 HRV 直接写入到 Apple Health。"
+            case .workout:
+                return "现在可以把生成的锻炼记录直接写入到 Apple Health。"
+            case .steps:
+                return "现在可以把生成的步数记录直接写入到 Apple Health。"
             }
         case .sharingDenied:
             return "请到系统设置里的 Health 权限页重新打开写入权限。"
@@ -101,6 +109,10 @@ final class SleepDataViewModel: ObservableObject {
                 return "首次写入前会弹出系统授权框，只申请 sleepAnalysis 写入权限。"
             case .hrv:
                 return "首次写入前会弹出系统授权框，只申请 heartRateVariabilitySDNN 写入权限。"
+            case .workout:
+                return "首次写入前会弹出系统授权框，申请 workout、活动能量与距离的写入权限。"
+            case .steps:
+                return "首次写入前会弹出系统授权框，只申请 stepCount 写入权限。"
             }
         case .unavailable:
             return "HealthKit 不支持当前运行环境。请在已开启 Health 的 iPhone 真机上运行。"
@@ -113,6 +125,10 @@ final class SleepDataViewModel: ObservableObject {
             return authorizationState.isAuthorized ? "写入到 Health" : "授权并写入到 Health"
         case .hrv:
             return authorizationState.isAuthorized ? "写入今天的 HRV" : "授权并写入今天的 HRV"
+        case .workout:
+            return authorizationState.isAuthorized ? "写入锻炼记录到 Health" : "授权并写入锻炼记录到 Health"
+        case .steps:
+            return authorizationState.isAuthorized ? "写入步数记录到 Health" : "授权并写入步数记录到 Health"
         }
     }
 
@@ -128,8 +144,16 @@ final class SleepDataViewModel: ObservableObject {
         selectedMode == .hrv
     }
 
+    var showsWorkoutControls: Bool {
+        selectedMode == .workout
+    }
+
+    var showsStepControls: Bool {
+        selectedMode == .steps
+    }
+
     var showsClearButton: Bool {
-        selectedMode == .sleep
+        true
     }
 
     var sleepDateTitle: String {
@@ -181,18 +205,83 @@ final class SleepDataViewModel: ObservableObject {
     }
 
     var hrvSummary: String {
-        let sampleDate = currentHRVRequest.sampleDate(calendar: calendar)
-        return "今天将写入 1 条 HRV sample。记录时间：\(Self.dateTimeFormatter.string(from: sampleDate))。状态：\(hrvRequest.preset.title)（\(hrvValueText)）。"
+        let request = currentHRVRequest
+        let samples = request.makeSamples(calendar: calendar)
+        guard let first = samples.first, let last = samples.last else {
+            return "请至少生成 1 天的 HRV。"
+        }
+
+        if samples.count == 1 {
+            return "今天将写入 1 条 HRV sample。记录时间：\(Self.dateTimeFormatter.string(from: last.date))。档位：\(hrvRequest.preset.title)（基准 \(hrvValueText)）。"
+        }
+
+        let rangeText = "\(Self.dateFormatter.string(from: first.date)) 到 \(Self.dateFormatter.string(from: last.date))"
+        return "将写入 \(samples.count) 条 HRV sample（每天 1 条，围绕基准 \(hrvValueText) 波动）。时间范围：\(rangeText)。档位：\(hrvRequest.preset.title)。"
+    }
+
+    var workoutScheduleSummary: String {
+        let sessions = workoutRequest.makeSessions(calendar: calendar)
+        guard let first = sessions.first, let last = sessions.last else {
+            return "请至少生成 1 天，且每周锻炼次数大于 0。"
+        }
+
+        let totalKilocalories = Int(sessions.reduce(0) { $0 + $1.kilocalories }.rounded())
+        let rangeText = "\(Self.dateFormatter.string(from: first.start)) 到 \(Self.dateFormatter.string(from: last.end))"
+        return "将写入 \(sessions.count) 次锻炼，总计约 \(totalKilocalories) 千卡。时间范围：\(rangeText)。"
+    }
+
+    var workoutBreakdown: String {
+        let sessions = workoutRequest.makeSessions(calendar: calendar)
+        guard !sessions.isEmpty else {
+            return "暂无锻炼记录"
+        }
+
+        let counts = sessions.reduce(into: [WorkoutKind: Int]()) { partialResult, session in
+            partialResult[session.kind, default: 0] += 1
+        }
+
+        return WorkoutKind.allCases
+            .filter { counts[$0, default: 0] > 0 }
+            .map { "\($0.title) \(counts[$0, default: 0]) 次" }
+            .joined(separator: " · ")
+    }
+
+    var stepScheduleSummary: String {
+        let sessions = stepRequest.makeSessions(calendar: calendar)
+        guard let first = sessions.first?.samples.first?.interval.start,
+              let last = sessions.last?.samples.last?.interval.end else {
+            return "请至少生成 1 天，且日均步数大于 0。"
+        }
+
+        let totalSteps = sessions.reduce(0) { $0 + $1.totalSteps }
+        let sampleCount = sessions.reduce(0) { $0 + $1.sampleCount }
+        let rangeText = "\(Self.dateFormatter.string(from: first)) 到 \(Self.dateFormatter.string(from: last))"
+        return "将写入 \(sessions.count) 天、共 \(sampleCount) 条 sample，总计约 \(totalSteps) 步。时间范围：\(rangeText)。"
     }
 
     var clearConfirmationMessage: String {
-        "会删除当前时间范围内、由本 app 写入的 sleepAnalysis 数据。不会影响其他来源的睡眠记录。\(sleepRequestRangeText)"
+        switch selectedMode {
+        case .hrv:
+            return "会删除当前时间范围内、由本 app 写入的 HRV 数据。不会影响其他来源的 HRV 记录。\(hrvRequestRangeText)"
+        case .workout:
+            return "会删除当前时间范围内、由本 app 写入的锻炼记录。不会影响其他来源的运动数据。\(workoutRequestRangeText)"
+        case .steps:
+            return "会删除当前时间范围内、由本 app 写入的步数记录。不会影响其他来源的步数数据。\(stepRequestRangeText)"
+        default:
+            return "会删除当前时间范围内、由本 app 写入的 sleepAnalysis 数据。不会影响其他来源的睡眠记录。\(sleepRequestRangeText)"
+        }
     }
 
     func setSelectedMode(_ mode: HealthDataMode) {
         selectedMode = mode
         if mode == .hrv {
             hrvRequest.recordDate = calendar.startOfDay(for: now())
+        }
+        if mode == .workout {
+            workoutRequest.endDate = calendar.startOfDay(for: now())
+        }
+        if mode == .steps {
+            stepRequest.endDate = calendar.startOfDay(for: now())
         }
         authorizationState = healthStore.authorizationStatus(for: mode)
         statusMessage = nil
@@ -204,6 +293,21 @@ final class SleepDataViewModel: ObservableObject {
 
     func apply(_ preset: QuickPreset) {
         preset.apply(to: &request, calendar: calendar, now: now())
+        statusMessage = nil
+    }
+
+    func apply(_ preset: HRVRangePreset) {
+        preset.apply(to: &hrvRequest, calendar: calendar, now: now())
+        statusMessage = nil
+    }
+
+    func apply(_ preset: WorkoutPreset) {
+        preset.apply(to: &workoutRequest, calendar: calendar, now: now())
+        statusMessage = nil
+    }
+
+    func apply(_ preset: StepPreset) {
+        preset.apply(to: &stepRequest, calendar: calendar, now: now())
         statusMessage = nil
     }
 
@@ -230,6 +334,23 @@ final class SleepDataViewModel: ObservableObject {
             await generateSleepData()
         case .hrv:
             await writeHRVData()
+        case .workout:
+            await generateWorkoutData()
+        case .steps:
+            await generateStepData()
+        }
+    }
+
+    func deleteCurrentRangeData() async {
+        switch selectedMode {
+        case .hrv:
+            await deleteHRVData()
+        case .workout:
+            await deleteWorkoutData()
+        case .steps:
+            await deleteStepData()
+        default:
+            await deleteSleepData()
         }
     }
 
@@ -266,9 +387,128 @@ final class SleepDataViewModel: ObservableObject {
             try await ensureAuthorization(for: .hrv)
 
             let result = try await healthStore.writeHRVData(for: currentHRVRequest)
-            statusMessage = "已写入今天的 HRV（\(result.sampleCount) 条 sample）。记录时间：\(Self.dateTimeFormatter.string(from: result.sampleDate))。数值：\(Int(result.valueMilliseconds)) ms。"
+            if result.sampleCount == 1 {
+                statusMessage = "已写入今天的 HRV（1 条 sample）。记录时间：\(Self.dateTimeFormatter.string(from: result.lastDate))。基准：\(Int(result.baselineMilliseconds)) ms。"
+            } else {
+                let rangeText = "\(Self.dateFormatter.string(from: result.firstDate)) 到 \(Self.dateFormatter.string(from: result.lastDate))"
+                statusMessage = "已写入 \(result.sampleCount) 条 HRV sample（围绕基准 \(Int(result.baselineMilliseconds)) ms 波动）。时间范围：\(rangeText)。批次 ID：\(result.batchID.prefix(8))。"
+            }
         } catch {
             authorizationState = healthStore.authorizationStatus(for: .hrv)
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    func generateWorkoutData() async {
+        guard !isWorking else {
+            return
+        }
+
+        isWorking = true
+        statusMessage = nil
+        defer { isWorking = false }
+
+        do {
+            try await ensureAuthorization(for: .workout)
+
+            let result = try await healthStore.writeWorkoutData(for: workoutRequest)
+            let rangeText = "\(Self.dateFormatter.string(from: result.firstStart)) 到 \(Self.dateFormatter.string(from: result.lastEnd))"
+            statusMessage = "已写入 \(result.workoutCount) 次锻炼（总计约 \(Int(result.totalKilocalories.rounded())) 千卡）。时间范围：\(rangeText)。批次 ID：\(result.batchID.prefix(8))。"
+        } catch {
+            authorizationState = healthStore.authorizationStatus(for: .workout)
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    func deleteWorkoutData() async {
+        guard !isWorking else {
+            return
+        }
+
+        isWorking = true
+        statusMessage = nil
+        defer { isWorking = false }
+
+        do {
+            try await ensureAuthorization(for: .workout)
+
+            let result = try await healthStore.deleteGeneratedWorkoutData(for: workoutRequest)
+            if result.deletedWorkoutCount == 0 {
+                statusMessage = "当前范围内没有找到由本 app 写入的锻炼记录。\(workoutRequestRangeText)。"
+            } else {
+                statusMessage = "已删除 \(result.deletedWorkoutCount) 次锻炼记录。\(workoutRequestRangeText)。"
+            }
+        } catch {
+            authorizationState = healthStore.authorizationStatus(for: .workout)
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    func deleteHRVData() async {
+        guard !isWorking else {
+            return
+        }
+
+        isWorking = true
+        statusMessage = nil
+        defer { isWorking = false }
+
+        do {
+            try await ensureAuthorization(for: .hrv)
+
+            let result = try await healthStore.deleteGeneratedHRVData(for: currentHRVRequest)
+            if result.deletedSampleCount == 0 {
+                statusMessage = "当前范围内没有找到由本 app 写入的 HRV 数据。\(hrvRequestRangeText)。"
+            } else {
+                statusMessage = "已删除 \(result.deletedSampleCount) 条 HRV sample。\(hrvRequestRangeText)。"
+            }
+        } catch {
+            authorizationState = healthStore.authorizationStatus(for: .hrv)
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    func generateStepData() async {
+        guard !isWorking else {
+            return
+        }
+
+        isWorking = true
+        statusMessage = nil
+        defer { isWorking = false }
+
+        do {
+            try await ensureAuthorization(for: .steps)
+
+            let result = try await healthStore.writeStepData(for: stepRequest)
+            let rangeText = "\(Self.dateFormatter.string(from: result.firstStart)) 到 \(Self.dateFormatter.string(from: result.lastEnd))"
+            statusMessage = "已写入 \(result.dayCount) 天步数（\(result.sampleCount) 条 sample，总计约 \(result.totalSteps) 步）。时间范围：\(rangeText)。批次 ID：\(result.batchID.prefix(8))。"
+        } catch {
+            authorizationState = healthStore.authorizationStatus(for: .steps)
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    func deleteStepData() async {
+        guard !isWorking else {
+            return
+        }
+
+        isWorking = true
+        statusMessage = nil
+        defer { isWorking = false }
+
+        do {
+            try await ensureAuthorization(for: .steps)
+
+            let result = try await healthStore.deleteGeneratedStepData(for: stepRequest)
+            if result.deletedSampleCount == 0 {
+                statusMessage = "当前范围内没有找到由本 app 写入的步数记录。\(stepRequestRangeText)。"
+            } else {
+                statusMessage = "已删除 \(result.deletedSampleCount) 条步数 sample。\(stepRequestRangeText)。"
+            }
+        } catch {
+            authorizationState = healthStore.authorizationStatus(for: .steps)
             statusMessage = error.localizedDescription
         }
     }
@@ -322,10 +562,45 @@ final class SleepDataViewModel: ObservableObject {
         return "时间范围：\(Self.dateTimeFormatter.string(from: first.bedtime)) 到 \(Self.dateTimeFormatter.string(from: last.wakeTime))"
     }
 
+    private var hrvRequestRangeText: String {
+        let samples = currentHRVRequest.makeSamples(calendar: calendar)
+        guard let first = samples.first, let last = samples.last else {
+            return "时间范围：未知"
+        }
+
+        return "时间范围：\(Self.dateFormatter.string(from: first.date)) 到 \(Self.dateFormatter.string(from: last.date))"
+    }
+
+    private var workoutRequestRangeText: String {
+        let sessions = workoutRequest.makeSessions(calendar: calendar)
+        guard let first = sessions.first, let last = sessions.last else {
+            return "时间范围：未知"
+        }
+
+        return "时间范围：\(Self.dateFormatter.string(from: first.start)) 到 \(Self.dateFormatter.string(from: last.end))"
+    }
+
+    private var stepRequestRangeText: String {
+        let sessions = stepRequest.makeSessions(calendar: calendar)
+        guard let first = sessions.first?.samples.first?.interval.start,
+              let last = sessions.last?.samples.last?.interval.end else {
+            return "时间范围：未知"
+        }
+
+        return "时间范围：\(Self.dateFormatter.string(from: first)) 到 \(Self.dateFormatter.string(from: last))"
+    }
+
     private static let dateTimeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.dateFormat = "M月d日 HH:mm"
+        return formatter
+    }()
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "yyyy年M月d日"
         return formatter
     }()
 

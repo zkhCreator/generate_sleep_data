@@ -17,6 +17,8 @@ import Foundation
 enum HealthDataMode: String, CaseIterable, Identifiable {
     case sleep
     case hrv
+    case workout
+    case steps
 
     var id: String { rawValue }
 
@@ -26,6 +28,10 @@ enum HealthDataMode: String, CaseIterable, Identifiable {
             return "Sleep"
         case .hrv:
             return "HRV"
+        case .workout:
+            return "锻炼"
+        case .steps:
+            return "步数"
         }
     }
 
@@ -35,6 +41,10 @@ enum HealthDataMode: String, CaseIterable, Identifiable {
             return "Sleep Data"
         case .hrv:
             return "HRV Data"
+        case .workout:
+            return "锻炼数据"
+        case .steps:
+            return "步数数据"
         }
     }
 }
@@ -71,17 +81,35 @@ enum HRVPreset: String, CaseIterable, Identifiable {
             return 82
         }
     }
+
+    /// How far a day's reading may swing above/below the baseline, in ms.
+    var variationMilliseconds: Double {
+        switch self {
+        case .tooLow:
+            return 4
+        case .tooHigh:
+            return 12
+        }
+    }
+}
+
+struct HRVDaySample: Equatable {
+    let date: Date
+    let valueMilliseconds: Double
 }
 
 struct HRVWriteRequest: Equatable {
     var recordDate: Date
     var sampleTime: Date
     var preset: HRVPreset
+    var days: Int = 1
 
+    /// The baseline value for the selected level (before per-day variation).
     var valueMilliseconds: Double {
         preset.valueMilliseconds
     }
 
+    /// The most-recent sample timestamp (the end of the range).
     func sampleDate(calendar: Calendar = .current) -> Date {
         calendar.combineHRVDate(
             date: calendar.startOfDay(for: recordDate),
@@ -89,12 +117,92 @@ struct HRVWriteRequest: Equatable {
         )
     }
 
+    /// One reading per day going back `days` from `recordDate`, each fluctuating
+    /// around the level baseline so the trend never looks flat.
+    func makeSamples(calendar: Calendar = .current) -> [HRVDaySample] {
+        guard days > 0 else {
+            return []
+        }
+
+        let endDay = calendar.startOfDay(for: recordDate)
+        return (0..<days)
+            .compactMap { offset -> HRVDaySample? in
+                guard let day = calendar.date(byAdding: .day, value: -offset, to: endDay) else {
+                    return nil
+                }
+
+                let sampleDate = calendar.combineHRVDate(date: day, withTimeFrom: sampleTime)
+                let seed = MockVariation.daySeed(for: day, calendar: calendar)
+                let value = max(1, (preset.valueMilliseconds + MockVariation.signedNoise(seed) * preset.variationMilliseconds).rounded())
+                return HRVDaySample(date: sampleDate, valueMilliseconds: value)
+            }
+            .sorted { $0.date < $1.date }
+    }
+
     static func `default`(calendar: Calendar = .current, now: Date = Date()) -> HRVWriteRequest {
         HRVWriteRequest(
             recordDate: calendar.startOfDay(for: now),
             sampleTime: now,
-            preset: .tooLow
+            preset: .tooLow,
+            days: 1
         )
+    }
+}
+
+enum HRVRangePreset: String, CaseIterable, Identifiable {
+    case today
+    case lastWeek
+    case lastMonth
+    case lastYear
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .today:
+            return "仅今天"
+        case .lastWeek:
+            return "最近 1 周"
+        case .lastMonth:
+            return "最近 1 个月"
+        case .lastYear:
+            return "一键 mock 1 年"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .today:
+            return "只写入今天 1 条 HRV"
+        case .lastWeek:
+            return "最近 7 天，每天 1 条，围绕所选档位波动"
+        case .lastMonth:
+            return "最近 30 天，每天 1 条，适合补一个月的 HRV 趋势"
+        case .lastYear:
+            return "最近 365 天，每天 1 条，一次性补满整年的 HRV 趋势"
+        }
+    }
+
+    var days: Int {
+        switch self {
+        case .today:
+            return 1
+        case .lastWeek:
+            return 7
+        case .lastMonth:
+            return 30
+        case .lastYear:
+            return 365
+        }
+    }
+
+    func apply(
+        to request: inout HRVWriteRequest,
+        calendar: Calendar = .current,
+        now: Date = Date()
+    ) {
+        request.recordDate = calendar.startOfDay(for: now)
+        request.days = days
     }
 }
 

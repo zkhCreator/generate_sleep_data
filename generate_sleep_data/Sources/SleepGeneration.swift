@@ -30,15 +30,25 @@ struct SleepGenerationRequest: Equatable {
         return (0..<nights)
             .map { offset in
                 let adjustedDate = calendar.date(byAdding: .day, value: -offset, to: sleepDate) ?? sleepDate
-                let bedtime = calendar.combine(
+                let baseBedtime = calendar.combine(
                     date: calendar.startOfDay(for: adjustedDate),
                     withTimeFrom: bedtimeTime
                 )
+
+                // Vary every night around the requested values so the batch never
+                // looks like the same night copied over and over.
+                let seed = MockVariation.daySeed(for: baseBedtime, calendar: calendar)
+                let bedtimeShift = Int((MockVariation.signedNoise(seed &* 4) * 30).rounded())
+                let bedtime = calendar.date(byAdding: .minute, value: bedtimeShift, to: baseBedtime) ?? baseBedtime
+                let durationMinutes = max(60, sleepDurationMinutes + Int((MockVariation.signedNoise(seed &* 4 &+ 1) * 45).rounded()))
+                let latencyMinutes = max(0, sleepLatencyMinutes + Int((MockVariation.signedNoise(seed &* 4 &+ 2) * 12).rounded()))
+                let awakeMinutes = max(0, overnightAwakeMinutes + Int((MockVariation.signedNoise(seed &* 4 &+ 3) * 15).rounded()))
+
                 return SleepSession.make(
                     bedtime: bedtime,
-                    sleepDurationMinutes: sleepDurationMinutes,
-                    sleepLatencyMinutes: sleepLatencyMinutes,
-                    overnightAwakeMinutes: overnightAwakeMinutes,
+                    sleepDurationMinutes: durationMinutes,
+                    sleepLatencyMinutes: latencyMinutes,
+                    overnightAwakeMinutes: awakeMinutes,
                     calendar: calendar
                 )
             }
@@ -117,6 +127,7 @@ enum QuickPreset: String, CaseIterable, Identifiable {
     case lastNight
     case lastWeek
     case lastMonth
+    case lastYear
 
     var id: String { rawValue }
 
@@ -128,6 +139,8 @@ enum QuickPreset: String, CaseIterable, Identifiable {
             return "最近 7 晚"
         case .lastMonth:
             return "最近 30 晚"
+        case .lastYear:
+            return "一键 mock 1 年"
         }
     }
 
@@ -139,6 +152,8 @@ enum QuickPreset: String, CaseIterable, Identifiable {
             return "7 晚，7 小时 30 分钟睡眠，附带完整 awake/core/deep/REM 分期"
         case .lastMonth:
             return "30 晚，7 小时 45 分钟睡眠，适合批量补整月分期数据"
+        case .lastYear:
+            return "365 晚，7 小时 45 分钟睡眠，一次性补满整年分期数据"
         }
     }
 
@@ -164,6 +179,11 @@ enum QuickPreset: String, CaseIterable, Identifiable {
             request.overnightAwakeMinutes = 20
         case .lastMonth:
             request.nights = 30
+            request.sleepDurationMinutes = (7 * 60) + 45
+            request.sleepLatencyMinutes = 10
+            request.overnightAwakeMinutes = 25
+        case .lastYear:
+            request.nights = 365
             request.sleepDurationMinutes = (7 * 60) + 45
             request.sleepLatencyMinutes = 10
             request.overnightAwakeMinutes = 25

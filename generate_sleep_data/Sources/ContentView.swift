@@ -58,6 +58,14 @@ struct ContentView: View {
                     hrvSections
                 }
 
+                if viewModel.showsWorkoutControls {
+                    workoutSections
+                }
+
+                if viewModel.showsStepControls {
+                    stepSections
+                }
+
                 if let statusMessage = viewModel.statusMessage {
                     Section("结果") {
                         Text(statusMessage)
@@ -77,7 +85,7 @@ struct ContentView: View {
         ) {
             Button("清除", role: .destructive) {
                 Task {
-                    await viewModel.deleteSleepData()
+                    await viewModel.deleteCurrentRangeData()
                 }
             }
             Button("取消", role: .cancel) {}
@@ -118,7 +126,7 @@ struct ContentView: View {
                 displayedComponents: [.hourAndMinute]
             )
 
-            Stepper(value: nightsBinding, in: 1...60) {
+            Stepper(value: nightsBinding, in: 1...365) {
                 LabeledContent("生成晚数", value: "\(viewModel.request.nights) 晚")
             }
 
@@ -172,7 +180,24 @@ struct ContentView: View {
 
     @ViewBuilder
     private var hrvSections: some View {
-        Section("今天的 HRV") {
+        Section("快速预设") {
+            ForEach(HRVRangePreset.allCases) { preset in
+                Button {
+                    viewModel.apply(preset)
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(preset.title)
+                            .font(.headline)
+                        Text(preset.subtitle)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+
+        Section("生成参数") {
             Picker("HRV 档位", selection: hrvPresetBinding) {
                 ForEach(HRVPreset.allCases) { preset in
                     Text(preset.segmentTitle).tag(preset)
@@ -186,7 +211,11 @@ struct ContentView: View {
                 displayedComponents: [.hourAndMinute]
             )
 
-            LabeledContent("HRV 数值", value: viewModel.hrvValueText)
+            Stepper(value: hrvDaysBinding, in: 1...365) {
+                LabeledContent("覆盖天数", value: "\(viewModel.hrvRequest.days) 天")
+            }
+
+            LabeledContent("基准 HRV", value: viewModel.hrvValueText)
 
             Text(viewModel.hrvSummary)
                 .font(.footnote)
@@ -202,8 +231,153 @@ struct ContentView: View {
                 actionLabel
             }
             .disabled(viewModel.isWorking || viewModel.authorizationState == .unavailable)
+
+            if viewModel.showsClearButton {
+                Button(role: .destructive) {
+                    isShowingDeleteConfirmation = true
+                } label: {
+                    Text(viewModel.clearButtonTitle)
+                        .fontWeight(.semibold)
+                        .frame(maxWidth: .infinity)
+                }
+                .disabled(viewModel.isWorking || viewModel.authorizationState == .unavailable)
+            }
         } footer: {
-            Text("会写入 1 条今天的 heartRateVariabilitySDNN sample，单位为毫秒（ms）。当前通过 segment 在过低 / 过高两种状态之间切换。")
+            Text("会按所选天数，每天写入 1 条 heartRateVariabilitySDNN sample（单位 ms），数值围绕所选档位的基准值逐日波动。清除入口只会删除当前范围内由本 app 写入的 HRV 数据。")
+        }
+    }
+
+    @ViewBuilder
+    private var workoutSections: some View {
+        Section("快速预设") {
+            ForEach(WorkoutPreset.allCases) { preset in
+                Button {
+                    viewModel.apply(preset)
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(preset.title)
+                            .font(.headline)
+                        Text(preset.subtitle)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+
+        Section("生成参数") {
+            DatePicker(
+                "最后一天",
+                selection: workoutEndDateBinding,
+                displayedComponents: [.date]
+            )
+
+            Stepper(value: workoutDaysBinding, in: 1...365) {
+                LabeledContent("覆盖天数", value: "\(viewModel.workoutRequest.days) 天")
+            }
+
+            Stepper(value: workoutsPerWeekBinding, in: 1...7) {
+                LabeledContent("每周锻炼", value: "\(viewModel.workoutRequest.workoutsPerWeek) 次")
+            }
+
+            Text(viewModel.workoutScheduleSummary)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+
+        Section("锻炼类型分布") {
+            Text(viewModel.workoutBreakdown)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+
+        Section {
+            Button {
+                Task {
+                    await viewModel.performPrimaryAction()
+                }
+            } label: {
+                actionLabel
+            }
+            .disabled(viewModel.isWorking || viewModel.authorizationState == .unavailable)
+
+            if viewModel.showsClearButton {
+                Button(role: .destructive) {
+                    isShowingDeleteConfirmation = true
+                } label: {
+                    Text(viewModel.clearButtonTitle)
+                        .fontWeight(.semibold)
+                        .frame(maxWidth: .infinity)
+                }
+                .disabled(viewModel.isWorking || viewModel.authorizationState == .unavailable)
+            }
+        } footer: {
+            Text("会按每周固定次数，在所选天数内自动轮换跑步 / 步行 / 骑行 / 力量训练 / 徒步 / 瑜伽 / 游泳等锻炼，并写入活动能量与距离。清除入口只会删除当前范围内由本 app 写入的锻炼记录。生成 1 年数据需要写入约 200 条锻炼，过程可能需要数十秒。")
+        }
+    }
+
+    @ViewBuilder
+    private var stepSections: some View {
+        Section("快速预设") {
+            ForEach(StepPreset.allCases) { preset in
+                Button {
+                    viewModel.apply(preset)
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(preset.title)
+                            .font(.headline)
+                        Text(preset.subtitle)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+
+        Section("生成参数") {
+            DatePicker(
+                "最后一天",
+                selection: stepEndDateBinding,
+                displayedComponents: [.date]
+            )
+
+            Stepper(value: stepDaysBinding, in: 1...365) {
+                LabeledContent("覆盖天数", value: "\(viewModel.stepRequest.days) 天")
+            }
+
+            Stepper(value: averageStepsBinding, in: 1000...30000, step: 500) {
+                LabeledContent("日均步数", value: "\(viewModel.stepRequest.averageStepsPerDay) 步")
+            }
+
+            Text(viewModel.stepScheduleSummary)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+
+        Section {
+            Button {
+                Task {
+                    await viewModel.performPrimaryAction()
+                }
+            } label: {
+                actionLabel
+            }
+            .disabled(viewModel.isWorking || viewModel.authorizationState == .unavailable)
+
+            if viewModel.showsClearButton {
+                Button(role: .destructive) {
+                    isShowingDeleteConfirmation = true
+                } label: {
+                    Text(viewModel.clearButtonTitle)
+                        .fontWeight(.semibold)
+                        .frame(maxWidth: .infinity)
+                }
+                .disabled(viewModel.isWorking || viewModel.authorizationState == .unavailable)
+            }
+        } footer: {
+            Text("会在所选天数内，按日均步数生成每天 08:00–22:00 的逐小时 stepCount sample（周末略微上调），并写入到 Apple Health。清除入口只会删除当前范围内由本 app 写入的步数记录。生成 1 年数据需要写入数千条 sample，过程可能需要数十秒。")
         }
     }
 
@@ -282,6 +456,55 @@ struct ContentView: View {
         Binding(
             get: { viewModel.hrvRequest.preset },
             set: { viewModel.hrvRequest.preset = $0 }
+        )
+    }
+
+    private var hrvDaysBinding: Binding<Int> {
+        Binding(
+            get: { viewModel.hrvRequest.days },
+            set: { viewModel.hrvRequest.days = $0 }
+        )
+    }
+
+    private var workoutEndDateBinding: Binding<Date> {
+        Binding(
+            get: { viewModel.workoutRequest.endDate },
+            set: { viewModel.workoutRequest.endDate = $0 }
+        )
+    }
+
+    private var workoutDaysBinding: Binding<Int> {
+        Binding(
+            get: { viewModel.workoutRequest.days },
+            set: { viewModel.workoutRequest.days = $0 }
+        )
+    }
+
+    private var workoutsPerWeekBinding: Binding<Int> {
+        Binding(
+            get: { viewModel.workoutRequest.workoutsPerWeek },
+            set: { viewModel.workoutRequest.workoutsPerWeek = $0 }
+        )
+    }
+
+    private var stepEndDateBinding: Binding<Date> {
+        Binding(
+            get: { viewModel.stepRequest.endDate },
+            set: { viewModel.stepRequest.endDate = $0 }
+        )
+    }
+
+    private var stepDaysBinding: Binding<Int> {
+        Binding(
+            get: { viewModel.stepRequest.days },
+            set: { viewModel.stepRequest.days = $0 }
+        )
+    }
+
+    private var averageStepsBinding: Binding<Int> {
+        Binding(
+            get: { viewModel.stepRequest.averageStepsPerDay },
+            set: { viewModel.stepRequest.averageStepsPerDay = $0 }
         )
     }
 }
